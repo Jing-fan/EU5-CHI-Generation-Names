@@ -1,0 +1,152 @@
+﻿# ==============================================================================
+# 宗室字辈系统 - 运行时事件钩子 (zibei_on_actions.txt)
+# ==============================================================================
+# 功能：
+#   1. on_character_birth   : 拦截正常出生的宗室婴儿，触发代际继承与自动赐名。
+#   2. on_character_created : 拦截经由事件/脚本生成的未成年宗室子女，防止漏名。
+#   3. on_new_ruler         : 天朝领袖换代时维护“皇室近支”标记，并对空降同宗新君做断代兜底。
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. 角色出生钩子（根作用域包含 scope:character）
+# ------------------------------------------------------------------------------
+on_character_birth = {
+	on_actions = {
+		zibei_on_character_birth
+	}
+}
+
+zibei_on_character_birth = {
+	trigger = {
+		scope:character = {
+			NOT = { has_variable = zibei_scheme }
+			OR = {
+				# 优先检查生父是否已纳入有效字辈方案（1..7）
+				father ?= {
+					has_variable = zibei_scheme
+					has_variable = zibei_generation
+					var:zibei_scheme >= 1
+					var:zibei_scheme <= 7
+				}
+				# 同宗联姻兜底：若生母与婴儿同宗且持有有效字辈方案
+				# 尽管EU5没有母系婚姻，但如果母亲是有效的宗室成员而父亲不是，则婴儿仍然可以继承母亲的字辈方案
+				AND = {
+					exists = dynasty
+					mother ?= {
+						has_variable = zibei_scheme
+						has_variable = zibei_generation
+						var:zibei_scheme >= 1
+						var:zibei_scheme <= 7
+						dynasty ?= prev.dynasty
+					}
+				}
+			}
+		}
+	}
+	effect = {
+		scope:character = {
+			zibei_inherit_and_name_effect = yes
+		}
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 2. 角色创建钩子（根作用域为新创建的角色自身，仅拦截未成年角色）
+# ------------------------------------------------------------------------------
+on_character_created = {
+	on_actions = {
+		zibei_on_character_created
+	}
+}
+
+zibei_on_character_created = {
+	trigger = {
+		is_adult = no
+		NOT = { has_variable = zibei_scheme }
+		OR = {
+			father ?= {
+				has_variable = zibei_scheme
+				has_variable = zibei_generation
+				var:zibei_scheme >= 1
+				var:zibei_scheme <= 7
+			}
+			AND = {
+				exists = dynasty
+				mother ?= {
+					has_variable = zibei_scheme
+					has_variable = zibei_generation
+					var:zibei_scheme >= 1
+					var:zibei_scheme <= 7
+					dynasty ?= prev.dynasty
+				}
+			}
+		}
+	}
+	effect = {
+		zibei_inherit_and_name_effect = yes
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 3. 天朝领袖换代钩子（维护近支标记 + 同宗空降新君代际兜底）
+# 皇室近支的定义为其父亲或者叔伯是皇帝，代码上等效于其父亲是皇帝或者祖父是皇帝之父
+# ------------------------------------------------------------------------------
+on_new_ruler = {
+	on_actions = {
+		zibei_on_new_ruler
+	}
+}
+
+zibei_on_new_ruler = {
+	trigger = {
+		exists = international_organization:middle_kingdom
+		is_leader_of_international_organization = international_organization:middle_kingdom
+	}
+	effect = {
+		# 为卸任君主及其生父打标，供 zibei_is_imperial_close_branch_trigger 进行近支判定
+		scope:old_ruler ?= {
+			set_variable = { name = zibei_was_emperor value = 1 }
+			father ?= { set_variable = { name = zibei_father_of_emperor value = 1 } }
+		}
+		# 同时兼容 scope:new_ruler 与当前 ruler 引用，确保新君主及生父标记不遗漏
+		scope:new_ruler ?= {
+			set_variable = { name = zibei_was_emperor value = 1 }
+			father ?= { set_variable = { name = zibei_father_of_emperor value = 1 } }
+			# 若新君与旧君同宗但此前无字辈变量（例如旁支空降继位），兜底承袭旧君方案与代数
+			if = {
+				limit = {
+					NOT = { has_variable = zibei_scheme }
+					scope:old_ruler ?= {
+						has_variable = zibei_scheme
+						has_variable = zibei_generation
+						var:zibei_scheme >= 1
+						var:zibei_scheme <= 7
+						exists = dynasty
+						dynasty ?= prev.dynasty
+					}
+				}
+				set_variable = { name = zibei_scheme value = scope:old_ruler.var:zibei_scheme }
+				set_variable = { name = zibei_generation value = scope:old_ruler.var:zibei_generation }
+			}
+		}
+		ruler ?= {
+			set_variable = { name = zibei_was_emperor value = 1 }
+			father ?= { set_variable = { name = zibei_father_of_emperor value = 1 } }
+			if = {
+				limit = {
+					NOT = { has_variable = zibei_scheme }
+					scope:old_ruler ?= {
+						has_variable = zibei_scheme
+						has_variable = zibei_generation
+						var:zibei_scheme >= 1
+						var:zibei_scheme <= 7
+						exists = dynasty
+						dynasty ?= prev.dynasty
+					}
+				}
+				set_variable = { name = zibei_scheme value = scope:old_ruler.var:zibei_scheme }
+				set_variable = { name = zibei_generation value = scope:old_ruler.var:zibei_generation }
+			}
+		}
+	}
+}

@@ -1,0 +1,93 @@
+﻿# ==============================================================================
+# 宗室字辈系统 - 决议入口 (zibei_decisions.txt)
+# ==============================================================================
+# 职责：
+#   为天朝领袖提供「钦定宗室字辈」决议入口，负责前置准入校验与防重入锁定。
+# 调用链路：
+#   establish_dynastic_zibei_decision (单选确认，写入 ruler.zibei_scheme = 99 占位锁)
+#     -> zibei_events.4 (字辈规制三选一，通过事件 option trigger 隐藏已占满的分支)
+#     -> zibei_events.1 / zibei_events.2 (选择具体二十字辈谱系) 或直接设定方案 3
+#     -> zibei_events.3 (按方案独立设定宗室女眷赐名礼制)
+# ==============================================================================
+
+establish_dynastic_zibei_decision = {
+	decision_category = government_decisions
+	historical_info = establish_dynastic_zibei_decision.historical_info
+	hide_repeatable_tag = yes
+
+	# 可见条件：天朝成员 + 当前统治者未确立字辈 + 7 套全局字辈尚未全部耗尽
+	potential = {
+		# 1. 处于天朝国际组织内
+		exists = international_organization:middle_kingdom
+		is_member_of_international_organization = international_organization:middle_kingdom
+
+		# 2. 存在统治者，且当前统治者尚未确立字辈方案（含 99 临时占位锁）
+		ruler ?= {
+			NOT = { has_variable = zibei_scheme }
+		}
+
+		# 3. 7 套字辈方案尚未被全部占用
+		NAND = {
+			has_global_variable = zibei_ming_donggong_chosen
+			has_global_variable = zibei_ming_yanwang_chosen
+			has_global_variable = zibei_qing_chosen
+			has_global_variable = zibei_other_mao_chosen
+			has_global_variable = zibei_other_kong_chosen
+			has_global_variable = zibei_other_qian_chosen
+			has_global_variable = zibei_other_yan_chosen
+		}
+	}
+
+	# 执行条件：天朝领袖 +（中华文化组 或 汉化价值观 > 50，即 sinicized_vs_unsinicized < -50）
+	allow = {
+		has_ruler = yes
+		# 条件1：当前国家为天朝领袖
+		is_leader_of_international_organization = international_organization:middle_kingdom
+
+		# 条件2：中华文化组，或非中华文化组但汉化程度超过 50
+		OR = {
+			culture = {
+				has_culture_group = culture_group:chinese_group
+			}
+			AND = {
+				has_societal_value = societal_value_type:sinicized_vs_unsinicized
+				societal_value:sinicized_vs_unsinicized < -50
+			}
+		}
+	}
+
+	# AI 启用倾向：默认积极启用；若现任君主为女性则放弃（EU5 子嗣随父姓，避免女皇外嫁导致字辈绝嗣浪费）
+	ai_will_do = {
+		value = 100
+		if = {
+			limit = {
+				ruler ?= { is_female = yes }
+			}
+			multiply = 0
+		}
+	}
+
+	illustration_tags = {
+		10 = interior
+		10 = happy
+	}
+
+	illustration_scope = {
+		event_illustration_government_estate_effect = yes
+		capital ?= { save_scope_as = target_location }
+		ruler ?= { save_scope_as = target_ruler }
+	}
+
+	# 唯一确认选项：写入临时占位锁（zibei_scheme = 99）防重复点击，并弹出前置事件 zibei_events.4
+	option = {
+		name = establish_dynastic_zibei_decision.a
+		ai_chance = { value = 100 }
+		effect = {
+			custom_tooltip = establish_dynastic_zibei_decision.a.tt
+			hidden_effect = {
+				ruler ?= { set_variable = { name = zibei_scheme value = 99 } }
+				trigger_event_non_silently = { id = zibei_events.4 }
+			}
+		}
+	}
+}

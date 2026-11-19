@@ -1,0 +1,368 @@
+﻿# ==============================================================================
+# 宗室字辈系统 - 钦定事件链 (zibei_events.txt)
+# ==============================================================================
+# 事件流转（事件编号遵循 EU5 规范 1..9999，全部选项均标记 high_risk_option = yes）：
+#   zibei_events.4 [前置三选一] 择定字辈规制（已占满的分支通过 hidden_trigger 自动隐藏）
+#     ├─ 选项 a（五行相生之制）-> zibei_events.1 [二选一：方案1 东宫系 / 方案2 燕王系] -> zibei_events.3
+#     ├─ 选项 b（世代同旁之制）-> 直接初始化方案3（清式）                               -> zibei_events.3
+#     └─ 选项 c（雅字通谱之制）-> zibei_events.2 [四选一：方案4 毛 / 5 孔 / 6 钱 / 7 颜] -> zibei_events.3
+#   zibei_events.3 [终局礼制] 按国家临时变量 zibei_pending_scheme 为对应方案独立开关女性赐名
+# ==============================================================================
+
+namespace = zibei_events
+
+# ------------------------------------------------------------------------------
+# 事件 4（前置入口）：钦定字辈规制三选一
+# ------------------------------------------------------------------------------
+zibei_events.4 = {
+	type = country_event
+	title = zibei_events.4.title
+	desc = zibei_events.4.desc
+	outcome = neutral
+
+	illustration_tags = {
+		10 = interior
+		10 = happy
+	}
+
+	immediate = {
+		event_illustration_government_estate_effect = yes
+		ruler ?= { save_scope_as = target_ruler }
+	}
+
+	# 选项1：五行相生之制 -> 触发 zibei_events.1
+	option = {
+		name = zibei_events.4.a
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NAND = {
+					has_global_variable = zibei_ming_donggong_chosen
+					has_global_variable = zibei_ming_yanwang_chosen
+				}
+			}
+		}
+		ai_will_select = {
+			value = 33
+			# 若统治者姓朱，权重拉满；若统治者为女真文化（且清式可选），权重清零
+			if = {
+				limit = {
+					ruler ?= { dynasty ?= dynasty:rtr_ming_zhu_dynasty }
+				}
+				add = 1000
+			}
+			if = {
+				limit = {
+					ruler ?= {
+						culture = { has_culture_group = culture_group:jurchen_group }
+					}
+					NOT = { has_global_variable = zibei_qing_chosen }
+				}
+				multiply = 0
+			}
+		}
+		custom_tooltip = zibei_events.4.a.tt
+		hidden_effect = {
+			trigger_event_non_silently = { id = zibei_events.1 }
+		}
+	}
+
+	# 选项2：世代同旁之制 -> 直接设定方案3并触发性别礼制事件 zibei_events.3
+	option = {
+		name = zibei_events.4.b
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_qing_chosen }
+			}
+		}
+		ai_will_select = {
+			value = 33
+			# 若统治者为女真文化，权重拉满；若统治者姓朱（且明式可选），权重清零
+			if = {
+				limit = {
+					ruler ?= {
+						culture = { has_culture_group = culture_group:jurchen_group }
+					}
+				}
+				add = 1000
+			}
+			if = {
+				limit = {
+					ruler ?= { dynasty ?= dynasty:rtr_ming_zhu_dynasty }
+					NAND = {
+						has_global_variable = zibei_ming_donggong_chosen
+						has_global_variable = zibei_ming_yanwang_chosen
+					}
+				}
+				multiply = 0
+			}
+		}
+		custom_tooltip = zibei_events.4.b.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_qing_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 3 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+
+	# 选项3：雅字通谱之制 -> 触发 zibei_events.2
+	option = {
+		name = zibei_events.4.c
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NAND = {
+					has_global_variable = zibei_other_mao_chosen
+					has_global_variable = zibei_other_kong_chosen
+					has_global_variable = zibei_other_qian_chosen
+					has_global_variable = zibei_other_yan_chosen
+				}
+			}
+		}
+		ai_will_select = {
+			value = 33
+			# 若统治者姓朱（且明式可选）或为女真文化（且清式可选），AI 不选此项
+			if = {
+				limit = {
+					OR = {
+						AND = {
+							ruler ?= { dynasty ?= dynasty:rtr_ming_zhu_dynasty }
+							NAND = {
+								has_global_variable = zibei_ming_donggong_chosen
+								has_global_variable = zibei_ming_yanwang_chosen
+							}
+						}
+						AND = {
+							ruler ?= {
+								culture = { has_culture_group = culture_group:jurchen_group }
+							}
+							NOT = { has_global_variable = zibei_qing_chosen }
+						}
+					}
+				}
+				multiply = 0
+			}
+		}
+		custom_tooltip = zibei_events.4.c.tt
+		hidden_effect = {
+			trigger_event_non_silently = { id = zibei_events.2 }
+		}
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 事件 1：钦定五行字辈谱系（方案 1 = 东宫系，方案 2 = 燕王系）
+# ------------------------------------------------------------------------------
+zibei_events.1 = {
+	type = country_event
+	title = zibei_events.1.title
+	desc = zibei_events.1.desc
+	outcome = neutral
+
+	illustration_tags = {
+		10 = interior
+		10 = happy
+	}
+
+	immediate = {
+		event_illustration_government_estate_effect = yes
+		ruler ?= { save_scope_as = target_ruler }
+	}
+
+	# 东宫系
+	option = {
+		name = zibei_events.1.a
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_ming_donggong_chosen }
+			}
+		}
+		ai_chance = { base = 50 }
+		custom_tooltip = zibei_events.1.a.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_ming_donggong_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 1 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+
+	# 燕王系
+	option = {
+		name = zibei_events.1.b
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_ming_yanwang_chosen }
+			}
+		}
+		ai_chance = { base = 50 }
+		custom_tooltip = zibei_events.1.b.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_ming_yanwang_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 2 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 事件 2：钦定通谱字辈谱系（方案 4 = 毛，5 = 孔，6 = 钱，7 = 颜）
+# ------------------------------------------------------------------------------
+zibei_events.2 = {
+	type = country_event
+	title = zibei_events.2.title
+	desc = zibei_events.2.desc
+	outcome = neutral
+
+	illustration_tags = {
+		10 = interior
+		10 = happy
+	}
+
+	immediate = {
+		event_illustration_government_estate_effect = yes
+		ruler ?= { save_scope_as = target_ruler }
+	}
+
+	option = {
+		name = zibei_events.2.a
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_other_mao_chosen }
+			}
+		}
+		ai_chance = { base = 25 }
+		custom_tooltip = zibei_events.2.a.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_other_mao_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 4 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+
+	option = {
+		name = zibei_events.2.b
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_other_kong_chosen }
+			}
+		}
+		ai_chance = { base = 25 }
+		custom_tooltip = zibei_events.2.b.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_other_kong_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 5 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+
+	option = {
+		name = zibei_events.2.c
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_other_qian_chosen }
+			}
+		}
+		ai_chance = { base = 25 }
+		custom_tooltip = zibei_events.2.c.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_other_qian_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 6 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+
+	option = {
+		name = zibei_events.2.d
+		high_risk_option = yes
+		trigger = {
+			hidden_trigger = {
+				NOT = { has_global_variable = zibei_other_yan_chosen }
+			}
+		}
+		ai_chance = { base = 25 }
+		custom_tooltip = zibei_events.2.d.tt
+		hidden_effect = {
+			set_global_variable = { name = zibei_other_yan_chosen value = 1 }
+			zibei_init_dynasty_scheme_effect = { SCHEME = 7 }
+			trigger_event_non_silently = { id = zibei_events.3 }
+		}
+	}
+}
+
+# ------------------------------------------------------------------------------
+# 事件 3：明定字辈礼制（按方案 1~7 独立配置 zibei_include_females_1..7，各朝互不干扰）
+# ------------------------------------------------------------------------------
+zibei_events.3 = {
+	type = country_event
+	title = zibei_events.3.title
+	desc = zibei_events.3.desc
+	outcome = neutral
+
+	illustration_tags = {
+		10 = interior
+		10 = happy
+	}
+
+	immediate = {
+		event_illustration_government_estate_effect = yes
+		ruler ?= { save_scope_as = target_ruler }
+		# 兜底：若通过控制台等途径单独触发本事件，则从当前统治者身上读取所属字辈方案编号
+		if = {
+			limit = {
+				NOT = { has_variable = zibei_pending_scheme }
+				ruler ?= {
+					has_variable = zibei_scheme
+					var:zibei_scheme >= 1
+					var:zibei_scheme <= 7
+				}
+			}
+			set_variable = { name = zibei_pending_scheme value = ruler.var:zibei_scheme }
+		}
+	}
+
+	option = {
+		name = zibei_events.3.a
+		high_risk_option = yes
+		ai_chance = { base = 80 }
+		custom_tooltip = zibei_events.3.a.tt
+		hidden_effect = {
+			if = {
+				limit = { has_variable = zibei_pending_scheme }
+				if = {      limit = { var:zibei_pending_scheme = 1 has_global_variable = zibei_include_females_1 } remove_global_variable = zibei_include_females_1 }
+				else_if = { limit = { var:zibei_pending_scheme = 2 has_global_variable = zibei_include_females_2 } remove_global_variable = zibei_include_females_2 }
+				else_if = { limit = { var:zibei_pending_scheme = 3 has_global_variable = zibei_include_females_3 } remove_global_variable = zibei_include_females_3 }
+				else_if = { limit = { var:zibei_pending_scheme = 4 has_global_variable = zibei_include_females_4 } remove_global_variable = zibei_include_females_4 }
+				else_if = { limit = { var:zibei_pending_scheme = 5 has_global_variable = zibei_include_females_5 } remove_global_variable = zibei_include_females_5 }
+				else_if = { limit = { var:zibei_pending_scheme = 6 has_global_variable = zibei_include_females_6 } remove_global_variable = zibei_include_females_6 }
+				else_if = { limit = { var:zibei_pending_scheme = 7 has_global_variable = zibei_include_females_7 } remove_global_variable = zibei_include_females_7 }
+				remove_variable = zibei_pending_scheme
+			}
+		}
+	}
+
+	option = {
+		name = zibei_events.3.b
+		high_risk_option = yes
+		ai_chance = { base = 20 }
+		custom_tooltip = zibei_events.3.b.tt
+		hidden_effect = {
+			if = {
+				limit = { has_variable = zibei_pending_scheme }
+				if = {      limit = { var:zibei_pending_scheme = 1 } set_global_variable = { name = zibei_include_females_1 value = 1 } }
+				else_if = { limit = { var:zibei_pending_scheme = 2 } set_global_variable = { name = zibei_include_females_2 value = 1 } }
+				else_if = { limit = { var:zibei_pending_scheme = 3 } set_global_variable = { name = zibei_include_females_3 value = 1 } }
+				else_if = { limit = { var:zibei_pending_scheme = 4 } set_global_variable = { name = zibei_include_females_4 value = 1 } }
+				else_if = { limit = { var:zibei_pending_scheme = 5 } set_global_variable = { name = zibei_include_females_5 value = 1 } }
+				else_if = { limit = { var:zibei_pending_scheme = 6 } set_global_variable = { name = zibei_include_females_6 value = 1 } }
+				else_if = { limit = { var:zibei_pending_scheme = 7 } set_global_variable = { name = zibei_include_females_7 value = 1 } }
+				remove_variable = zibei_pending_scheme
+			}
+		}
+	}
+}

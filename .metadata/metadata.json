@@ -1,0 +1,12 @@
+﻿{
+	"name":	"天朝宗族字辈命名",
+	"id":	"talisz.gen_name",
+	"version":	"1.0",
+	"supported_game_version":	"1.*",
+	"short_description":	"为天朝皇室提供了多种二十字辈的宗族命名规制。",
+	"tags":	["Characters", "Historical"],
+	"relationships":	[],
+	"picture":	"thumbnail.png",
+	"game_custom_data":	{
+	}
+}

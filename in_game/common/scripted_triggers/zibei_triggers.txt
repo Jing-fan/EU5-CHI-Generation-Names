@@ -1,0 +1,48 @@
+﻿# ==============================================================================
+# 宗室字辈系统 - 脚本触发器 (zibei_triggers.txt)
+# ==============================================================================
+# 功能：
+#   1. zibei_is_imperial_close_branch_trigger : O(1) 判断新生儿是否属于皇室近支。
+#   2. zibei_scheme_includes_females_trigger  : 按当前角色所属方案（1..7）查询该王朝是否启用女眷赐名。
+# ==============================================================================
+
+# 判断当前新生儿是否属于“皇室近支”（生父、叔伯、祖父或生母曾为/现为天朝皇帝）
+zibei_is_imperial_close_branch_trigger = {
+	OR = {
+		# 1. 生父本人曾是或现为天朝皇帝
+		father ?= {
+			OR = {
+				has_variable = zibei_was_emperor
+				international_organization:middle_kingdom.leader_country.ruler ?= { this = prev }
+			}
+		}
+		# 2. 祖父曾是或现为天朝皇帝，或祖父是某位天朝皇帝的生父（即新生儿的生父或叔伯曾为皇帝）
+		father.father ?= {
+			OR = {
+				has_variable = zibei_was_emperor
+				has_variable = zibei_father_of_emperor
+				international_organization:middle_kingdom.leader_country.ruler ?= { this = prev }
+			}
+		}
+		# 3. 同宗女皇直系兜底：生母本人曾是或现为天朝女皇
+		mother ?= {
+			OR = {
+				has_variable = zibei_was_emperor
+				international_organization:middle_kingdom.leader_country.ruler ?= { this = prev }
+			}
+		}
+	}
+}
+
+# 按当前角色所属字辈方案（1..7），判断该王朝是否启用了“宗室女性按字辈赐名”
+zibei_scheme_includes_females_trigger = {
+	OR = {
+		AND = { var:zibei_scheme = 1 has_global_variable = zibei_include_females_1 }
+		AND = { var:zibei_scheme = 2 has_global_variable = zibei_include_females_2 }
+		AND = { var:zibei_scheme = 3 has_global_variable = zibei_include_females_3 }
+		AND = { var:zibei_scheme = 4 has_global_variable = zibei_include_females_4 }
+		AND = { var:zibei_scheme = 5 has_global_variable = zibei_include_females_5 }
+		AND = { var:zibei_scheme = 6 has_global_variable = zibei_include_females_6 }
+		AND = { var:zibei_scheme = 7 has_global_variable = zibei_include_females_7 }
+	}
+}

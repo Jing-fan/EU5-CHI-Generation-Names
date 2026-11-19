@@ -1,0 +1,4217 @@
+﻿# ==============================================================================
+# 宗室字辈系统 - 核心脚本效果引擎 (zibei_effects.txt)
+# ==============================================================================
+# 模块总览：
+#   零、皇室字辈方案初始化 (zibei_init_dynasty_scheme_effect)
+#       - 明式 (1/2)：始祖 = 99，父 = 98，已出生子辈 = 100（新出生的男丁取木字旁单字名），孙辈起 = 1..20
+#       - 清式与通谱 (3..7)：始祖 = 20，父 = 19，已出生子辈起 = 1..20
+#   一、出生代际传递与方案分发 (zibei_inherit_and_name_effect)
+#       - 代际递推：parent.gen + 1；21 -> 1（满 20 代回环），101 -> 1（明式孙辈入第 1 字辈）
+#   二、七套字辈方案主函数（含明式始祖之子辈单字木字旁专属函数）
+#   三、智能分流 (zibei_smart_pick_effect)：区分性别、皇室近支/旁系及百年偏旁水位线保护
+#   四、独立无参滑动冷却抽号池 (13 个 100 字男池 + 1 个 200 字女池，防止近期重名)
+#   五、静态键值赋名映射（对应 zibei_names_l_simp_chinese.yml 及 zibei_wood_001..100）
+# ==============================================================================
+
+# ==========================================================
+# 全局参数配置（修改此处数值即可调整冷却长度与重置周期）
+# 冷却步数是指在多少步内该字库的字不能再次被抽取，这个值越小重名的可能越高; 而太大则会导致命名随机性下降。
+# 水位线计数器是指在多少年后重置偏旁字库的使用次数，考虑到一个字库的重复使用中间应当间隔4代人，100年是一个很保守的数值
+# ==========================================================
+@zibei_close_branch_cd = 95        # 近支皇子占用偏旁字的冷却步数（100字库锁95步）
+@zibei_distant_branch_cd = 45      # 旁系宗室占用偏旁字的冷却步数（45步，优先释放）
+@zibei_general_cd = 90             # 通用男字库（100字）的冷却步数
+@zibei_female_cd = 180             # 女性专属字库（200字）的冷却步数
+@zibei_watermark_reset_years = 100 # 偏旁字库水位线计数器的重置周期（100年）
+
+# ==========================================================
+# 零、 皇室字辈方案初始化（决议与事件调用入口）
+# ==========================================================
+zibei_init_dynasty_scheme_effect = {
+	# 记录本次正在确立的字辈方案编号，供紧接弹出的 zibei_events.3 独立配置该方案的女性赐名礼制
+	set_variable = { name = zibei_pending_scheme value = $SCHEME$ }
+	ruler ?= {
+		save_scope_as = zibei_founder
+		set_variable = { name = zibei_was_emperor value = 1 }
+		set_variable = { name = zibei_scheme value = $SCHEME$ }
+
+		if = {
+			limit = {
+				OR = {
+					var:zibei_scheme = 1
+					var:zibei_scheme = 2
+				}
+			}
+			# 明式（五行相生）：始祖代际设为 99，其父为 98，其子辈为 100（新出生的儿子取木字旁单字名），
+			# 自孙辈起（100 + 1 = 101 -> 1）正式进入二十字辈与火/土/金/水/木五行轮转
+			set_variable = { name = zibei_generation value = 99 }
+			father ?= {
+				set_variable = { name = zibei_father_of_emperor value = 1 }
+				set_variable = { name = zibei_scheme value = $SCHEME$ }
+				set_variable = { name = zibei_generation value = 98 }
+			}
+			# 为已出生的同宗族直系子嗣（100=木字旁单字辈）、孙辈（第1代）、曾孙辈（第2代）初始化代数
+			every_child = {
+				limit = { dynasty ?= scope:zibei_founder.dynasty }
+				set_variable = { name = zibei_scheme value = $SCHEME$ }
+				set_variable = { name = zibei_generation value = 100 }
+				every_child = {
+					limit = { prev = { is_female = no } }
+					set_variable = { name = zibei_scheme value = $SCHEME$ }
+					set_variable = { name = zibei_generation value = 1 }
+					every_child = {
+						limit = { prev = { is_female = no } }
+						set_variable = { name = zibei_scheme value = $SCHEME$ }
+						set_variable = { name = zibei_generation value = 2 }
+					}
+				}
+			}
+		}
+		else = {
+			# 清式与通谱：始祖代际设为 20（正整数非零，确保引擎持久化存储），
+			# 其子出生时 +1 变为 21 自动回环为第 1 代，直接自子辈起按字辈命名
+			set_variable = { name = zibei_generation value = 20 }
+			father ?= {
+				set_variable = { name = zibei_father_of_emperor value = 1 }
+				set_variable = { name = zibei_scheme value = $SCHEME$ }
+				set_variable = { name = zibei_generation value = 19 }
+			}
+			# 为已出生的同宗族直系子嗣（第1代）、孙辈（第2代）、曾孙辈（第3代）初始化代数
+			every_child = {
+				limit = { dynasty ?= scope:zibei_founder.dynasty }
+				set_variable = { name = zibei_scheme value = $SCHEME$ }
+				set_variable = { name = zibei_generation value = 1 }
+				every_child = {
+					limit = { prev = { is_female = no } }
+					set_variable = { name = zibei_scheme value = $SCHEME$ }
+					set_variable = { name = zibei_generation value = 2 }
+					every_child = {
+						limit = { prev = { is_female = no } }
+						set_variable = { name = zibei_scheme value = $SCHEME$ }
+						set_variable = { name = zibei_generation value = 3 }
+					}
+				}
+			}
+		}
+	}
+	# 为国内其他同宗族成员（如兄弟、叔伯、堂兄弟等）兜底初始化字辈方案，防止兄终弟及或旁支继位时断代
+	if = {
+		limit = { exists = scope:zibei_founder.dynasty }
+		every_character = {
+			limit = {
+				dynasty ?= scope:zibei_founder.dynasty
+				OR = {
+					NOT = { has_variable = zibei_scheme }
+					var:zibei_scheme = 99
+				}
+			}
+			set_variable = { name = zibei_scheme value = $SCHEME$ }
+			if = {
+				limit = {
+					father ?= {
+						has_variable = zibei_generation
+					}
+				}
+				set_variable = { name = zibei_generation value = father.var:zibei_generation }
+				change_variable = { name = zibei_generation add = 1 }
+				if = {
+					limit = {
+						OR = {
+							var:zibei_generation = 21
+							var:zibei_generation = 101
+						}
+					}
+					set_variable = { name = zibei_generation value = 1 }
+				}
+			}
+			else = {
+				if = {
+					limit = {
+						OR = {
+							var:zibei_scheme = 1
+							var:zibei_scheme = 2
+						}
+					}
+					set_variable = { name = zibei_generation value = 99 }
+				}
+				else = {
+					set_variable = { name = zibei_generation value = 20 }
+				}
+			}
+		}
+	}
+}
+
+# ==========================================================
+# 一、 出生代际传递与方案分发入口
+# ==========================================================
+zibei_inherit_and_name_effect = {
+	if = {
+		limit = {
+			father ?= {
+				has_variable = zibei_scheme
+				has_variable = zibei_generation
+				var:zibei_scheme >= 1
+				var:zibei_scheme <= 7
+			}
+		}
+		father = {
+			save_scope_as = zibei_parent
+		}
+	}
+	else_if = {
+		limit = {
+			mother ?= {
+				has_variable = zibei_scheme
+				has_variable = zibei_generation
+				var:zibei_scheme >= 1
+				var:zibei_scheme <= 7
+			}
+		}
+		mother = {
+			save_scope_as = zibei_parent
+		}
+	}
+
+	if = {
+		limit = { exists = scope:zibei_parent }
+		set_variable = {
+			name = zibei_scheme
+			value = scope:zibei_parent.var:zibei_scheme
+		}
+		set_variable = {
+			name = zibei_generation
+			value = scope:zibei_parent.var:zibei_generation
+		}
+		change_variable = {
+			name = zibei_generation
+			add = 1
+		}
+		# 20代满环（21 -> 1）或明式始祖之子辈下一代（101 -> 1），统一进入/回到第 1 字辈
+		if = {
+			limit = {
+				OR = {
+					var:zibei_generation = 21
+					var:zibei_generation = 101
+				}
+			}
+			set_variable = { name = zibei_generation value = 1 }
+		}
+
+		# 分支1：明式始祖同辈（gen = 99，如始祖之父在世再生子），仅静默继承代际变量，不改名
+		if = {
+			limit = { var:zibei_generation = 99 }
+		}
+		# 分支2：明式始祖之子辈（gen = 100）：男丁先从木字旁字库取单字名，女儿保留常规随机名字
+		else_if = {
+			limit = { var:zibei_generation = 100 }
+			if = {
+				limit = {
+					is_female = no
+					OR = {
+						var:zibei_scheme = 1
+						var:zibei_scheme = 2
+					}
+				}
+				zibei_apply_ming_son_wood_name_effect = yes
+			}
+		}
+		# 分支3：正式进入二十字辈（gen = 1..20）
+		# 若为男性，或该字辈方案开启了“男女皆按字辈赐名”，则执行字辈赐名；
+		# 若未开启女眷赐名，女性子嗣仅静默继承代际变量，保持常规随机名字
+		else_if = {
+			limit = {
+				OR = {
+					is_female = no
+					zibei_scheme_includes_females_trigger = yes
+				}
+			}
+			if = {      limit = { var:zibei_scheme = 1 } zibei_apply_ming_donggong_name_effect = yes }
+			else_if = { limit = { var:zibei_scheme = 2 } zibei_apply_ming_yanwang_name_effect = yes }
+			else_if = { limit = { var:zibei_scheme = 3 } zibei_apply_qing_name_effect = yes }
+			else_if = { limit = { var:zibei_scheme = 4 } zibei_apply_other_mao_name_effect = yes }
+			else_if = { limit = { var:zibei_scheme = 5 } zibei_apply_other_kong_name_effect = yes }
+			else_if = { limit = { var:zibei_scheme = 6 } zibei_apply_other_qian_name_effect = yes }
+			else_if = { limit = { var:zibei_scheme = 7 } zibei_apply_other_yan_name_effect = yes }
+		}
+	}
+}
+
+# ==========================================================
+# 二、 七套字辈方案主函数
+# 由于EU5引擎不支持动态传参，故每套字辈方案都需要独立的语句，以下的重复代码为无奈之举
+# 不过性能上并没有太大的开销，轮询完全足够应对，考虑到可能的拓展，没有在这里做更复杂的优化
+# ==========================================================
+
+# 0. 明式·始祖之子辈专属：从木字旁字库（100字）抽取单字名（以应“木生火”之始）
+zibei_apply_ming_son_wood_name_effect = {
+	if = {
+		limit = { zibei_is_imperial_close_branch_trigger = yes }
+		set_local_variable = { name = zibei_cd_len value = @zibei_close_branch_cd }
+	}
+	else = {
+		set_local_variable = { name = zibei_cd_len value = @zibei_distant_branch_cd }
+	}
+	zibei_roll_pool_wood = yes
+	zibei_assign_wood_single_name = yes
+}
+
+# 1. 明式·东宫系 (zibei_scheme = 1)
+# 允文遵祖训，钦武大君胜，顺道宜逢吉，师良善用晟
+zibei_apply_ming_donggong_name_effect = {
+	if = {      limit = { var:zibei_generation = 1 }  zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_dg_01 } }
+	else_if = { limit = { var:zibei_generation = 2 }  zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_dg_02 } }
+	else_if = { limit = { var:zibei_generation = 3 }  zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_dg_03 } }
+	else_if = { limit = { var:zibei_generation = 4 }  zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_dg_04 } }
+	else_if = { limit = { var:zibei_generation = 5 }  zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_dg_05 } }
+	else_if = { limit = { var:zibei_generation = 6 }  zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_dg_06 } }
+	else_if = { limit = { var:zibei_generation = 7 }  zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_dg_07 } }
+	else_if = { limit = { var:zibei_generation = 8 }  zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_dg_08 } }
+	else_if = { limit = { var:zibei_generation = 9 }  zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_dg_09 } }
+	else_if = { limit = { var:zibei_generation = 10 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_dg_10 } }
+	else_if = { limit = { var:zibei_generation = 11 } zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_dg_11 } }
+	else_if = { limit = { var:zibei_generation = 12 } zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_dg_12 } }
+	else_if = { limit = { var:zibei_generation = 13 } zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_dg_13 } }
+	else_if = { limit = { var:zibei_generation = 14 } zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_dg_14 } }
+	else_if = { limit = { var:zibei_generation = 15 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_dg_15 } }
+	else_if = { limit = { var:zibei_generation = 16 } zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_dg_16 } }
+	else_if = { limit = { var:zibei_generation = 17 } zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_dg_17 } }
+	else_if = { limit = { var:zibei_generation = 18 } zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_dg_18 } }
+	else_if = { limit = { var:zibei_generation = 19 } zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_dg_19 } }
+	else_if = { limit = { var:zibei_generation = 20 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_dg_20 } }
+}
+
+# 2. 明式·燕王系 (zibei_scheme = 2)
+# 高瞻祁见祐，厚载翊常由，慈和怡伯仲，简靖迪先猷
+zibei_apply_ming_yanwang_name_effect = {
+	if = {      limit = { var:zibei_generation = 1 }  zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_yw_01 } }
+	else_if = { limit = { var:zibei_generation = 2 }  zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_yw_02 } }
+	else_if = { limit = { var:zibei_generation = 3 }  zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_yw_03 } }
+	else_if = { limit = { var:zibei_generation = 4 }  zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_yw_04 } }
+	else_if = { limit = { var:zibei_generation = 5 }  zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_yw_05 } }
+	else_if = { limit = { var:zibei_generation = 6 }  zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_yw_06 } }
+	else_if = { limit = { var:zibei_generation = 7 }  zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_yw_07 } }
+	else_if = { limit = { var:zibei_generation = 8 }  zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_yw_08 } }
+	else_if = { limit = { var:zibei_generation = 9 }  zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_yw_09 } }
+	else_if = { limit = { var:zibei_generation = 10 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_yw_10 } }
+	else_if = { limit = { var:zibei_generation = 11 } zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_yw_11 } }
+	else_if = { limit = { var:zibei_generation = 12 } zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_yw_12 } }
+	else_if = { limit = { var:zibei_generation = 13 } zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_yw_13 } }
+	else_if = { limit = { var:zibei_generation = 14 } zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_yw_14 } }
+	else_if = { limit = { var:zibei_generation = 15 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_yw_15 } }
+	else_if = { limit = { var:zibei_generation = 16 } zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_ming_yw_16 } }
+	else_if = { limit = { var:zibei_generation = 17 } zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_ming_yw_17 } }
+	else_if = { limit = { var:zibei_generation = 18 } zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_ming_yw_18 } }
+	else_if = { limit = { var:zibei_generation = 19 } zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_ming_yw_19 } }
+	else_if = { limit = { var:zibei_generation = 20 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_ming_yw_20 } }
+}
+
+# 3. 清式·爱新觉罗系 (zibei_scheme = 3)
+# 胤弘永绵奕，载溥毓恒启，焘闿增祺敬，志开端锡英
+zibei_apply_qing_name_effect = {
+	if = {      limit = { var:zibei_generation = 1 }  zibei_smart_pick_effect = { POOL = shi   ZIBEI = zibei_qing_01 } }
+	else_if = { limit = { var:zibei_generation = 2 }  zibei_smart_pick_effect = { POOL = ri    ZIBEI = zibei_qing_02 } }
+	else_if = { limit = { var:zibei_generation = 3 }  zibei_smart_pick_effect = { POOL = yu    ZIBEI = zibei_qing_03 } }
+	else_if = { limit = { var:zibei_generation = 4 }  zibei_smart_pick_effect = { POOL = xin   ZIBEI = zibei_qing_04 } }
+	else_if = { limit = { var:zibei_generation = 5 }  zibei_smart_pick_effect = { POOL = yan   ZIBEI = zibei_qing_05 } }
+	else_if = { limit = { var:zibei_generation = 6 }  zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_qing_06 } }
+	else_if = { limit = { var:zibei_generation = 7 }  zibei_smart_pick_effect = { POOL = ren   ZIBEI = zibei_qing_07 } }
+	else_if = { limit = { var:zibei_generation = 8 }  zibei_smart_pick_effect = { POOL = shan  ZIBEI = zibei_qing_08 } }
+	else_if = { limit = { var:zibei_generation = 9 }  zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_qing_09 } }
+	else_if = { limit = { var:zibei_generation = 10 } zibei_smart_pick_effect = { POOL = yu    ZIBEI = zibei_qing_10 } }
+	else_if = { limit = { var:zibei_generation = 11 } zibei_smart_pick_effect = { POOL = fire  ZIBEI = zibei_qing_11 } }
+	else_if = { limit = { var:zibei_generation = 12 } zibei_smart_pick_effect = { POOL = earth ZIBEI = zibei_qing_12 } }
+	else_if = { limit = { var:zibei_generation = 13 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_qing_13 } }
+	else_if = { limit = { var:zibei_generation = 14 } zibei_smart_pick_effect = { POOL = ri    ZIBEI = zibei_qing_14 } }
+	else_if = { limit = { var:zibei_generation = 15 } zibei_smart_pick_effect = { POOL = xin   ZIBEI = zibei_qing_15 } }
+	else_if = { limit = { var:zibei_generation = 16 } zibei_smart_pick_effect = { POOL = yan   ZIBEI = zibei_qing_16 } }
+	else_if = { limit = { var:zibei_generation = 17 } zibei_smart_pick_effect = { POOL = water ZIBEI = zibei_qing_17 } }
+	else_if = { limit = { var:zibei_generation = 18 } zibei_smart_pick_effect = { POOL = yu    ZIBEI = zibei_qing_18 } }
+	else_if = { limit = { var:zibei_generation = 19 } zibei_smart_pick_effect = { POOL = metal ZIBEI = zibei_qing_19 } }
+	else_if = { limit = { var:zibei_generation = 20 } zibei_smart_pick_effect = { POOL = wood  ZIBEI = zibei_qing_20 } }
+}
+
+# 4~7. 名门通谱四系 (4=毛, 5=孔, 6=钱, 7=颜)
+zibei_apply_other_mao_name_effect  = { zibei_apply_general_scheme = { PREFIX = mao } }
+zibei_apply_other_kong_name_effect = { zibei_apply_general_scheme = { PREFIX = kong } }
+zibei_apply_other_qian_name_effect = { zibei_apply_general_scheme = { PREFIX = qian } }
+zibei_apply_other_yan_name_effect  = { zibei_apply_general_scheme = { PREFIX = yan } }
+
+zibei_apply_general_scheme = {
+	if = {
+		limit = { is_female = yes }
+		set_local_variable = { name = zibei_cd_len value = @zibei_female_cd }
+		zibei_roll_pool_female = yes
+		if = {      limit = { var:zibei_generation = 1 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_01 } }
+		else_if = { limit = { var:zibei_generation = 2 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_02 } }
+		else_if = { limit = { var:zibei_generation = 3 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_03 } }
+		else_if = { limit = { var:zibei_generation = 4 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_04 } }
+		else_if = { limit = { var:zibei_generation = 5 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_05 } }
+		else_if = { limit = { var:zibei_generation = 6 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_06 } }
+		else_if = { limit = { var:zibei_generation = 7 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_07 } }
+		else_if = { limit = { var:zibei_generation = 8 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_08 } }
+		else_if = { limit = { var:zibei_generation = 9 }  zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_09 } }
+		else_if = { limit = { var:zibei_generation = 10 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_10 } }
+		else_if = { limit = { var:zibei_generation = 11 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_11 } }
+		else_if = { limit = { var:zibei_generation = 12 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_12 } }
+		else_if = { limit = { var:zibei_generation = 13 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_13 } }
+		else_if = { limit = { var:zibei_generation = 14 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_14 } }
+		else_if = { limit = { var:zibei_generation = 15 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_15 } }
+		else_if = { limit = { var:zibei_generation = 16 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_16 } }
+		else_if = { limit = { var:zibei_generation = 17 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_17 } }
+		else_if = { limit = { var:zibei_generation = 18 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_18 } }
+		else_if = { limit = { var:zibei_generation = 19 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_19 } }
+		else_if = { limit = { var:zibei_generation = 20 } zibei_assign_female_name = { ZIBEI = zibei_$PREFIX$_20 } }
+	}
+	else = {
+		set_local_variable = { name = zibei_cd_len value = @zibei_general_cd }
+		zibei_roll_pool_general = yes
+		if = {      limit = { var:zibei_generation = 1 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_01 } }
+		else_if = { limit = { var:zibei_generation = 2 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_02 } }
+		else_if = { limit = { var:zibei_generation = 3 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_03 } }
+		else_if = { limit = { var:zibei_generation = 4 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_04 } }
+		else_if = { limit = { var:zibei_generation = 5 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_05 } }
+		else_if = { limit = { var:zibei_generation = 6 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_06 } }
+		else_if = { limit = { var:zibei_generation = 7 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_07 } }
+		else_if = { limit = { var:zibei_generation = 8 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_08 } }
+		else_if = { limit = { var:zibei_generation = 9 }  zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_09 } }
+		else_if = { limit = { var:zibei_generation = 10 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_10 } }
+		else_if = { limit = { var:zibei_generation = 11 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_11 } }
+		else_if = { limit = { var:zibei_generation = 12 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_12 } }
+		else_if = { limit = { var:zibei_generation = 13 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_13 } }
+		else_if = { limit = { var:zibei_generation = 14 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_14 } }
+		else_if = { limit = { var:zibei_generation = 15 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_15 } }
+		else_if = { limit = { var:zibei_generation = 16 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_16 } }
+		else_if = { limit = { var:zibei_generation = 17 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_17 } }
+		else_if = { limit = { var:zibei_generation = 18 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_18 } }
+		else_if = { limit = { var:zibei_generation = 19 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_19 } }
+		else_if = { limit = { var:zibei_generation = 20 } zibei_assign_name = { POOL = general ZIBEI = zibei_$PREFIX$_20 } }
+	}
+}
+
+# ==========================================================
+# 三、 智能分流（区分性别、近支/旁系，并用 local_variable 合并偏旁调用）
+# ==========================================================
+zibei_smart_pick_effect = {
+	# 若为女性子嗣，直接从200字女性雅字库中抽取第3个字（与字辈字拼接），不消耗男性偏旁名额
+	if = {
+		limit = { is_female = yes }
+		set_local_variable = { name = zibei_cd_len value = @zibei_female_cd }
+		zibei_roll_pool_female = yes
+		zibei_assign_female_name = { ZIBEI = $ZIBEI$ }
+	}
+	else = {
+		# 1. 每100年定时重置偏旁字库的水位线计数器
+		if = {
+			limit = {
+				OR = {
+					NOT = { has_global_variable = zibei_reset_year_$POOL$ }
+					current_year >= global_var:zibei_reset_year_$POOL$
+				}
+			}
+			set_global_variable = { name = zibei_reset_year_$POOL$ value = current_year }
+			change_global_variable = { name = zibei_reset_year_$POOL$ add = @zibei_watermark_reset_years }
+			set_global_variable = { name = zibei_gen_used_$POOL$ value = 1 }
+		}
+
+		# 2. 决定使用偏旁字库还是通用字库，并设定对应的 local_var:zibei_cd_len
+		if = {
+			limit = { zibei_is_imperial_close_branch_trigger = yes }
+			set_local_variable = { name = zibei_use_general value = 1 }
+			set_local_variable = { name = zibei_cd_len value = @zibei_close_branch_cd }
+		}
+		else = {
+			random_list = {
+				80 = {
+					trigger = { global_var:zibei_gen_used_$POOL$ < 80 }
+					modifier = {
+						add = {
+							value = global_var:zibei_gen_used_$POOL$
+							multiply = -1
+						}
+					}
+					set_local_variable = { name = zibei_use_general value = 1 }
+					set_local_variable = { name = zibei_cd_len value = @zibei_distant_branch_cd }
+				}
+				10 = {
+					modifier = { add = global_var:zibei_gen_used_$POOL$ }
+					set_local_variable = { name = zibei_use_general value = 2 }
+					set_local_variable = { name = zibei_cd_len value = @zibei_general_cd }
+				}
+			}
+		}
+
+		# 3. 执行无参抽号函数 + 轻量赋名映射
+		if = {
+			limit = { local_var:zibei_use_general = 1 }
+			change_global_variable = { name = zibei_gen_used_$POOL$ add = 1 }
+			zibei_roll_pool_$POOL$ = yes
+			zibei_assign_name = { POOL = $POOL$ ZIBEI = $ZIBEI$ }
+		}
+		else = {
+			zibei_roll_pool_general = yes
+			zibei_assign_name = { POOL = general ZIBEI = $ZIBEI$ }
+		}
+	}
+}
+
+# ==========================================================
+# 四、 独立无参抽号函数（仅编译时展开 13 + 1 次）
+# ==========================================================
+zibei_roll_pool_fire    = { zibei_roll_pool_macro = { POOL = fire } }
+zibei_roll_pool_earth   = { zibei_roll_pool_macro = { POOL = earth } }
+zibei_roll_pool_metal   = { zibei_roll_pool_macro = { POOL = metal } }
+zibei_roll_pool_water   = { zibei_roll_pool_macro = { POOL = water } }
+zibei_roll_pool_wood    = { zibei_roll_pool_macro = { POOL = wood } }
+zibei_roll_pool_shi     = { zibei_roll_pool_macro = { POOL = shi } }
+zibei_roll_pool_ri      = { zibei_roll_pool_macro = { POOL = ri } }
+zibei_roll_pool_yu      = { zibei_roll_pool_macro = { POOL = yu } }
+zibei_roll_pool_xin     = { zibei_roll_pool_macro = { POOL = xin } }
+zibei_roll_pool_yan     = { zibei_roll_pool_macro = { POOL = yan } }
+zibei_roll_pool_ren     = { zibei_roll_pool_macro = { POOL = ren } }
+zibei_roll_pool_shan    = { zibei_roll_pool_macro = { POOL = shan } }
+zibei_roll_pool_general = { zibei_roll_pool_macro = { POOL = general } }
+
+# 100字通用/偏旁池抽号宏（直接在 random_list 内展开权重块，符合 Jomini 语法校验）
+zibei_roll_pool_macro = {
+	if = {
+		limit = { NOT = { has_global_variable = zibei_step_$POOL$ } }
+		set_global_variable = { name = zibei_step_$POOL$ value = 1 }
+	}
+	else = {
+		change_global_variable = { name = zibei_step_$POOL$ add = 1 }
+	}
+
+	random_list = {
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_001 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_001
+				}
+			}
+			set_local_variable = { name = zibei_id value = 1 }
+			set_global_variable = { name = zibei_cd_$POOL$_001 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_001 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_002 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_002
+				}
+			}
+			set_local_variable = { name = zibei_id value = 2 }
+			set_global_variable = { name = zibei_cd_$POOL$_002 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_002 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_003 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_003
+				}
+			}
+			set_local_variable = { name = zibei_id value = 3 }
+			set_global_variable = { name = zibei_cd_$POOL$_003 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_003 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_004 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_004
+				}
+			}
+			set_local_variable = { name = zibei_id value = 4 }
+			set_global_variable = { name = zibei_cd_$POOL$_004 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_004 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_005 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_005
+				}
+			}
+			set_local_variable = { name = zibei_id value = 5 }
+			set_global_variable = { name = zibei_cd_$POOL$_005 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_005 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_006 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_006
+				}
+			}
+			set_local_variable = { name = zibei_id value = 6 }
+			set_global_variable = { name = zibei_cd_$POOL$_006 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_006 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_007 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_007
+				}
+			}
+			set_local_variable = { name = zibei_id value = 7 }
+			set_global_variable = { name = zibei_cd_$POOL$_007 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_007 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_008 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_008
+				}
+			}
+			set_local_variable = { name = zibei_id value = 8 }
+			set_global_variable = { name = zibei_cd_$POOL$_008 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_008 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_009 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_009
+				}
+			}
+			set_local_variable = { name = zibei_id value = 9 }
+			set_global_variable = { name = zibei_cd_$POOL$_009 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_009 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_010 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_010
+				}
+			}
+			set_local_variable = { name = zibei_id value = 10 }
+			set_global_variable = { name = zibei_cd_$POOL$_010 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_010 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_011 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_011
+				}
+			}
+			set_local_variable = { name = zibei_id value = 11 }
+			set_global_variable = { name = zibei_cd_$POOL$_011 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_011 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_012 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_012
+				}
+			}
+			set_local_variable = { name = zibei_id value = 12 }
+			set_global_variable = { name = zibei_cd_$POOL$_012 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_012 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_013 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_013
+				}
+			}
+			set_local_variable = { name = zibei_id value = 13 }
+			set_global_variable = { name = zibei_cd_$POOL$_013 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_013 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_014 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_014
+				}
+			}
+			set_local_variable = { name = zibei_id value = 14 }
+			set_global_variable = { name = zibei_cd_$POOL$_014 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_014 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_015 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_015
+				}
+			}
+			set_local_variable = { name = zibei_id value = 15 }
+			set_global_variable = { name = zibei_cd_$POOL$_015 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_015 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_016 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_016
+				}
+			}
+			set_local_variable = { name = zibei_id value = 16 }
+			set_global_variable = { name = zibei_cd_$POOL$_016 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_016 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_017 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_017
+				}
+			}
+			set_local_variable = { name = zibei_id value = 17 }
+			set_global_variable = { name = zibei_cd_$POOL$_017 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_017 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_018 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_018
+				}
+			}
+			set_local_variable = { name = zibei_id value = 18 }
+			set_global_variable = { name = zibei_cd_$POOL$_018 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_018 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_019 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_019
+				}
+			}
+			set_local_variable = { name = zibei_id value = 19 }
+			set_global_variable = { name = zibei_cd_$POOL$_019 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_019 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_020 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_020
+				}
+			}
+			set_local_variable = { name = zibei_id value = 20 }
+			set_global_variable = { name = zibei_cd_$POOL$_020 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_020 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_021 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_021
+				}
+			}
+			set_local_variable = { name = zibei_id value = 21 }
+			set_global_variable = { name = zibei_cd_$POOL$_021 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_021 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_022 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_022
+				}
+			}
+			set_local_variable = { name = zibei_id value = 22 }
+			set_global_variable = { name = zibei_cd_$POOL$_022 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_022 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_023 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_023
+				}
+			}
+			set_local_variable = { name = zibei_id value = 23 }
+			set_global_variable = { name = zibei_cd_$POOL$_023 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_023 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_024 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_024
+				}
+			}
+			set_local_variable = { name = zibei_id value = 24 }
+			set_global_variable = { name = zibei_cd_$POOL$_024 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_024 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_025 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_025
+				}
+			}
+			set_local_variable = { name = zibei_id value = 25 }
+			set_global_variable = { name = zibei_cd_$POOL$_025 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_025 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_026 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_026
+				}
+			}
+			set_local_variable = { name = zibei_id value = 26 }
+			set_global_variable = { name = zibei_cd_$POOL$_026 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_026 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_027 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_027
+				}
+			}
+			set_local_variable = { name = zibei_id value = 27 }
+			set_global_variable = { name = zibei_cd_$POOL$_027 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_027 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_028 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_028
+				}
+			}
+			set_local_variable = { name = zibei_id value = 28 }
+			set_global_variable = { name = zibei_cd_$POOL$_028 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_028 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_029 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_029
+				}
+			}
+			set_local_variable = { name = zibei_id value = 29 }
+			set_global_variable = { name = zibei_cd_$POOL$_029 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_029 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_030 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_030
+				}
+			}
+			set_local_variable = { name = zibei_id value = 30 }
+			set_global_variable = { name = zibei_cd_$POOL$_030 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_030 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_031 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_031
+				}
+			}
+			set_local_variable = { name = zibei_id value = 31 }
+			set_global_variable = { name = zibei_cd_$POOL$_031 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_031 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_032 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_032
+				}
+			}
+			set_local_variable = { name = zibei_id value = 32 }
+			set_global_variable = { name = zibei_cd_$POOL$_032 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_032 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_033 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_033
+				}
+			}
+			set_local_variable = { name = zibei_id value = 33 }
+			set_global_variable = { name = zibei_cd_$POOL$_033 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_033 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_034 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_034
+				}
+			}
+			set_local_variable = { name = zibei_id value = 34 }
+			set_global_variable = { name = zibei_cd_$POOL$_034 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_034 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_035 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_035
+				}
+			}
+			set_local_variable = { name = zibei_id value = 35 }
+			set_global_variable = { name = zibei_cd_$POOL$_035 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_035 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_036 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_036
+				}
+			}
+			set_local_variable = { name = zibei_id value = 36 }
+			set_global_variable = { name = zibei_cd_$POOL$_036 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_036 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_037 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_037
+				}
+			}
+			set_local_variable = { name = zibei_id value = 37 }
+			set_global_variable = { name = zibei_cd_$POOL$_037 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_037 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_038 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_038
+				}
+			}
+			set_local_variable = { name = zibei_id value = 38 }
+			set_global_variable = { name = zibei_cd_$POOL$_038 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_038 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_039 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_039
+				}
+			}
+			set_local_variable = { name = zibei_id value = 39 }
+			set_global_variable = { name = zibei_cd_$POOL$_039 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_039 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_040 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_040
+				}
+			}
+			set_local_variable = { name = zibei_id value = 40 }
+			set_global_variable = { name = zibei_cd_$POOL$_040 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_040 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_041 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_041
+				}
+			}
+			set_local_variable = { name = zibei_id value = 41 }
+			set_global_variable = { name = zibei_cd_$POOL$_041 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_041 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_042 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_042
+				}
+			}
+			set_local_variable = { name = zibei_id value = 42 }
+			set_global_variable = { name = zibei_cd_$POOL$_042 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_042 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_043 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_043
+				}
+			}
+			set_local_variable = { name = zibei_id value = 43 }
+			set_global_variable = { name = zibei_cd_$POOL$_043 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_043 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_044 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_044
+				}
+			}
+			set_local_variable = { name = zibei_id value = 44 }
+			set_global_variable = { name = zibei_cd_$POOL$_044 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_044 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_045 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_045
+				}
+			}
+			set_local_variable = { name = zibei_id value = 45 }
+			set_global_variable = { name = zibei_cd_$POOL$_045 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_045 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_046 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_046
+				}
+			}
+			set_local_variable = { name = zibei_id value = 46 }
+			set_global_variable = { name = zibei_cd_$POOL$_046 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_046 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_047 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_047
+				}
+			}
+			set_local_variable = { name = zibei_id value = 47 }
+			set_global_variable = { name = zibei_cd_$POOL$_047 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_047 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_048 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_048
+				}
+			}
+			set_local_variable = { name = zibei_id value = 48 }
+			set_global_variable = { name = zibei_cd_$POOL$_048 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_048 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_049 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_049
+				}
+			}
+			set_local_variable = { name = zibei_id value = 49 }
+			set_global_variable = { name = zibei_cd_$POOL$_049 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_049 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_050 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_050
+				}
+			}
+			set_local_variable = { name = zibei_id value = 50 }
+			set_global_variable = { name = zibei_cd_$POOL$_050 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_050 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_051 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_051
+				}
+			}
+			set_local_variable = { name = zibei_id value = 51 }
+			set_global_variable = { name = zibei_cd_$POOL$_051 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_051 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_052 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_052
+				}
+			}
+			set_local_variable = { name = zibei_id value = 52 }
+			set_global_variable = { name = zibei_cd_$POOL$_052 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_052 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_053 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_053
+				}
+			}
+			set_local_variable = { name = zibei_id value = 53 }
+			set_global_variable = { name = zibei_cd_$POOL$_053 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_053 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_054 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_054
+				}
+			}
+			set_local_variable = { name = zibei_id value = 54 }
+			set_global_variable = { name = zibei_cd_$POOL$_054 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_054 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_055 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_055
+				}
+			}
+			set_local_variable = { name = zibei_id value = 55 }
+			set_global_variable = { name = zibei_cd_$POOL$_055 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_055 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_056 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_056
+				}
+			}
+			set_local_variable = { name = zibei_id value = 56 }
+			set_global_variable = { name = zibei_cd_$POOL$_056 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_056 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_057 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_057
+				}
+			}
+			set_local_variable = { name = zibei_id value = 57 }
+			set_global_variable = { name = zibei_cd_$POOL$_057 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_057 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_058 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_058
+				}
+			}
+			set_local_variable = { name = zibei_id value = 58 }
+			set_global_variable = { name = zibei_cd_$POOL$_058 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_058 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_059 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_059
+				}
+			}
+			set_local_variable = { name = zibei_id value = 59 }
+			set_global_variable = { name = zibei_cd_$POOL$_059 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_059 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_060 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_060
+				}
+			}
+			set_local_variable = { name = zibei_id value = 60 }
+			set_global_variable = { name = zibei_cd_$POOL$_060 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_060 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_061 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_061
+				}
+			}
+			set_local_variable = { name = zibei_id value = 61 }
+			set_global_variable = { name = zibei_cd_$POOL$_061 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_061 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_062 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_062
+				}
+			}
+			set_local_variable = { name = zibei_id value = 62 }
+			set_global_variable = { name = zibei_cd_$POOL$_062 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_062 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_063 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_063
+				}
+			}
+			set_local_variable = { name = zibei_id value = 63 }
+			set_global_variable = { name = zibei_cd_$POOL$_063 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_063 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_064 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_064
+				}
+			}
+			set_local_variable = { name = zibei_id value = 64 }
+			set_global_variable = { name = zibei_cd_$POOL$_064 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_064 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_065 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_065
+				}
+			}
+			set_local_variable = { name = zibei_id value = 65 }
+			set_global_variable = { name = zibei_cd_$POOL$_065 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_065 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_066 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_066
+				}
+			}
+			set_local_variable = { name = zibei_id value = 66 }
+			set_global_variable = { name = zibei_cd_$POOL$_066 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_066 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_067 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_067
+				}
+			}
+			set_local_variable = { name = zibei_id value = 67 }
+			set_global_variable = { name = zibei_cd_$POOL$_067 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_067 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_068 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_068
+				}
+			}
+			set_local_variable = { name = zibei_id value = 68 }
+			set_global_variable = { name = zibei_cd_$POOL$_068 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_068 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_069 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_069
+				}
+			}
+			set_local_variable = { name = zibei_id value = 69 }
+			set_global_variable = { name = zibei_cd_$POOL$_069 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_069 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_070 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_070
+				}
+			}
+			set_local_variable = { name = zibei_id value = 70 }
+			set_global_variable = { name = zibei_cd_$POOL$_070 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_070 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_071 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_071
+				}
+			}
+			set_local_variable = { name = zibei_id value = 71 }
+			set_global_variable = { name = zibei_cd_$POOL$_071 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_071 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_072 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_072
+				}
+			}
+			set_local_variable = { name = zibei_id value = 72 }
+			set_global_variable = { name = zibei_cd_$POOL$_072 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_072 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_073 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_073
+				}
+			}
+			set_local_variable = { name = zibei_id value = 73 }
+			set_global_variable = { name = zibei_cd_$POOL$_073 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_073 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_074 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_074
+				}
+			}
+			set_local_variable = { name = zibei_id value = 74 }
+			set_global_variable = { name = zibei_cd_$POOL$_074 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_074 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_075 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_075
+				}
+			}
+			set_local_variable = { name = zibei_id value = 75 }
+			set_global_variable = { name = zibei_cd_$POOL$_075 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_075 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_076 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_076
+				}
+			}
+			set_local_variable = { name = zibei_id value = 76 }
+			set_global_variable = { name = zibei_cd_$POOL$_076 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_076 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_077 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_077
+				}
+			}
+			set_local_variable = { name = zibei_id value = 77 }
+			set_global_variable = { name = zibei_cd_$POOL$_077 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_077 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_078 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_078
+				}
+			}
+			set_local_variable = { name = zibei_id value = 78 }
+			set_global_variable = { name = zibei_cd_$POOL$_078 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_078 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_079 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_079
+				}
+			}
+			set_local_variable = { name = zibei_id value = 79 }
+			set_global_variable = { name = zibei_cd_$POOL$_079 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_079 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_080 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_080
+				}
+			}
+			set_local_variable = { name = zibei_id value = 80 }
+			set_global_variable = { name = zibei_cd_$POOL$_080 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_080 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_081 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_081
+				}
+			}
+			set_local_variable = { name = zibei_id value = 81 }
+			set_global_variable = { name = zibei_cd_$POOL$_081 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_081 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_082 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_082
+				}
+			}
+			set_local_variable = { name = zibei_id value = 82 }
+			set_global_variable = { name = zibei_cd_$POOL$_082 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_082 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_083 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_083
+				}
+			}
+			set_local_variable = { name = zibei_id value = 83 }
+			set_global_variable = { name = zibei_cd_$POOL$_083 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_083 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_084 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_084
+				}
+			}
+			set_local_variable = { name = zibei_id value = 84 }
+			set_global_variable = { name = zibei_cd_$POOL$_084 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_084 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_085 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_085
+				}
+			}
+			set_local_variable = { name = zibei_id value = 85 }
+			set_global_variable = { name = zibei_cd_$POOL$_085 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_085 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_086 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_086
+				}
+			}
+			set_local_variable = { name = zibei_id value = 86 }
+			set_global_variable = { name = zibei_cd_$POOL$_086 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_086 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_087 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_087
+				}
+			}
+			set_local_variable = { name = zibei_id value = 87 }
+			set_global_variable = { name = zibei_cd_$POOL$_087 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_087 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_088 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_088
+				}
+			}
+			set_local_variable = { name = zibei_id value = 88 }
+			set_global_variable = { name = zibei_cd_$POOL$_088 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_088 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_089 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_089
+				}
+			}
+			set_local_variable = { name = zibei_id value = 89 }
+			set_global_variable = { name = zibei_cd_$POOL$_089 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_089 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_090 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_090
+				}
+			}
+			set_local_variable = { name = zibei_id value = 90 }
+			set_global_variable = { name = zibei_cd_$POOL$_090 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_090 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_091 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_091
+				}
+			}
+			set_local_variable = { name = zibei_id value = 91 }
+			set_global_variable = { name = zibei_cd_$POOL$_091 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_091 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_092 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_092
+				}
+			}
+			set_local_variable = { name = zibei_id value = 92 }
+			set_global_variable = { name = zibei_cd_$POOL$_092 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_092 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_093 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_093
+				}
+			}
+			set_local_variable = { name = zibei_id value = 93 }
+			set_global_variable = { name = zibei_cd_$POOL$_093 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_093 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_094 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_094
+				}
+			}
+			set_local_variable = { name = zibei_id value = 94 }
+			set_global_variable = { name = zibei_cd_$POOL$_094 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_094 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_095 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_095
+				}
+			}
+			set_local_variable = { name = zibei_id value = 95 }
+			set_global_variable = { name = zibei_cd_$POOL$_095 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_095 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_096 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_096
+				}
+			}
+			set_local_variable = { name = zibei_id value = 96 }
+			set_global_variable = { name = zibei_cd_$POOL$_096 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_096 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_097 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_097
+				}
+			}
+			set_local_variable = { name = zibei_id value = 97 }
+			set_global_variable = { name = zibei_cd_$POOL$_097 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_097 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_098 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_098
+				}
+			}
+			set_local_variable = { name = zibei_id value = 98 }
+			set_global_variable = { name = zibei_cd_$POOL$_098 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_098 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_099 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_099
+				}
+			}
+			set_local_variable = { name = zibei_id value = 99 }
+			set_global_variable = { name = zibei_cd_$POOL$_099 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_099 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_$POOL$_100 }
+					global_var:zibei_step_$POOL$ >= global_var:zibei_cd_$POOL$_100
+				}
+			}
+			set_local_variable = { name = zibei_id value = 100 }
+			set_global_variable = { name = zibei_cd_$POOL$_100 value = global_var:zibei_step_$POOL$ }
+			change_global_variable = { name = zibei_cd_$POOL$_100 add = local_var:zibei_cd_len }
+		}
+	}
+}
+
+# 200字女性专属字库独立无参抽号函数
+zibei_roll_pool_female = {
+	if = {
+		limit = { NOT = { has_global_variable = zibei_step_female } }
+		set_global_variable = { name = zibei_step_female value = 1 }
+	}
+	else = {
+		change_global_variable = { name = zibei_step_female add = 1 }
+	}
+
+	random_list = {
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_001 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_001
+				}
+			}
+			set_local_variable = { name = zibei_id value = 1 }
+			set_global_variable = { name = zibei_cd_female_001 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_001 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_002 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_002
+				}
+			}
+			set_local_variable = { name = zibei_id value = 2 }
+			set_global_variable = { name = zibei_cd_female_002 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_002 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_003 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_003
+				}
+			}
+			set_local_variable = { name = zibei_id value = 3 }
+			set_global_variable = { name = zibei_cd_female_003 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_003 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_004 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_004
+				}
+			}
+			set_local_variable = { name = zibei_id value = 4 }
+			set_global_variable = { name = zibei_cd_female_004 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_004 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_005 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_005
+				}
+			}
+			set_local_variable = { name = zibei_id value = 5 }
+			set_global_variable = { name = zibei_cd_female_005 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_005 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_006 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_006
+				}
+			}
+			set_local_variable = { name = zibei_id value = 6 }
+			set_global_variable = { name = zibei_cd_female_006 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_006 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_007 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_007
+				}
+			}
+			set_local_variable = { name = zibei_id value = 7 }
+			set_global_variable = { name = zibei_cd_female_007 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_007 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_008 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_008
+				}
+			}
+			set_local_variable = { name = zibei_id value = 8 }
+			set_global_variable = { name = zibei_cd_female_008 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_008 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_009 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_009
+				}
+			}
+			set_local_variable = { name = zibei_id value = 9 }
+			set_global_variable = { name = zibei_cd_female_009 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_009 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_010 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_010
+				}
+			}
+			set_local_variable = { name = zibei_id value = 10 }
+			set_global_variable = { name = zibei_cd_female_010 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_010 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_011 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_011
+				}
+			}
+			set_local_variable = { name = zibei_id value = 11 }
+			set_global_variable = { name = zibei_cd_female_011 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_011 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_012 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_012
+				}
+			}
+			set_local_variable = { name = zibei_id value = 12 }
+			set_global_variable = { name = zibei_cd_female_012 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_012 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_013 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_013
+				}
+			}
+			set_local_variable = { name = zibei_id value = 13 }
+			set_global_variable = { name = zibei_cd_female_013 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_013 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_014 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_014
+				}
+			}
+			set_local_variable = { name = zibei_id value = 14 }
+			set_global_variable = { name = zibei_cd_female_014 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_014 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_015 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_015
+				}
+			}
+			set_local_variable = { name = zibei_id value = 15 }
+			set_global_variable = { name = zibei_cd_female_015 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_015 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_016 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_016
+				}
+			}
+			set_local_variable = { name = zibei_id value = 16 }
+			set_global_variable = { name = zibei_cd_female_016 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_016 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_017 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_017
+				}
+			}
+			set_local_variable = { name = zibei_id value = 17 }
+			set_global_variable = { name = zibei_cd_female_017 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_017 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_018 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_018
+				}
+			}
+			set_local_variable = { name = zibei_id value = 18 }
+			set_global_variable = { name = zibei_cd_female_018 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_018 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_019 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_019
+				}
+			}
+			set_local_variable = { name = zibei_id value = 19 }
+			set_global_variable = { name = zibei_cd_female_019 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_019 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_020 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_020
+				}
+			}
+			set_local_variable = { name = zibei_id value = 20 }
+			set_global_variable = { name = zibei_cd_female_020 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_020 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_021 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_021
+				}
+			}
+			set_local_variable = { name = zibei_id value = 21 }
+			set_global_variable = { name = zibei_cd_female_021 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_021 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_022 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_022
+				}
+			}
+			set_local_variable = { name = zibei_id value = 22 }
+			set_global_variable = { name = zibei_cd_female_022 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_022 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_023 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_023
+				}
+			}
+			set_local_variable = { name = zibei_id value = 23 }
+			set_global_variable = { name = zibei_cd_female_023 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_023 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_024 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_024
+				}
+			}
+			set_local_variable = { name = zibei_id value = 24 }
+			set_global_variable = { name = zibei_cd_female_024 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_024 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_025 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_025
+				}
+			}
+			set_local_variable = { name = zibei_id value = 25 }
+			set_global_variable = { name = zibei_cd_female_025 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_025 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_026 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_026
+				}
+			}
+			set_local_variable = { name = zibei_id value = 26 }
+			set_global_variable = { name = zibei_cd_female_026 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_026 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_027 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_027
+				}
+			}
+			set_local_variable = { name = zibei_id value = 27 }
+			set_global_variable = { name = zibei_cd_female_027 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_027 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_028 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_028
+				}
+			}
+			set_local_variable = { name = zibei_id value = 28 }
+			set_global_variable = { name = zibei_cd_female_028 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_028 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_029 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_029
+				}
+			}
+			set_local_variable = { name = zibei_id value = 29 }
+			set_global_variable = { name = zibei_cd_female_029 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_029 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_030 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_030
+				}
+			}
+			set_local_variable = { name = zibei_id value = 30 }
+			set_global_variable = { name = zibei_cd_female_030 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_030 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_031 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_031
+				}
+			}
+			set_local_variable = { name = zibei_id value = 31 }
+			set_global_variable = { name = zibei_cd_female_031 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_031 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_032 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_032
+				}
+			}
+			set_local_variable = { name = zibei_id value = 32 }
+			set_global_variable = { name = zibei_cd_female_032 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_032 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_033 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_033
+				}
+			}
+			set_local_variable = { name = zibei_id value = 33 }
+			set_global_variable = { name = zibei_cd_female_033 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_033 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_034 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_034
+				}
+			}
+			set_local_variable = { name = zibei_id value = 34 }
+			set_global_variable = { name = zibei_cd_female_034 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_034 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_035 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_035
+				}
+			}
+			set_local_variable = { name = zibei_id value = 35 }
+			set_global_variable = { name = zibei_cd_female_035 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_035 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_036 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_036
+				}
+			}
+			set_local_variable = { name = zibei_id value = 36 }
+			set_global_variable = { name = zibei_cd_female_036 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_036 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_037 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_037
+				}
+			}
+			set_local_variable = { name = zibei_id value = 37 }
+			set_global_variable = { name = zibei_cd_female_037 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_037 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_038 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_038
+				}
+			}
+			set_local_variable = { name = zibei_id value = 38 }
+			set_global_variable = { name = zibei_cd_female_038 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_038 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_039 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_039
+				}
+			}
+			set_local_variable = { name = zibei_id value = 39 }
+			set_global_variable = { name = zibei_cd_female_039 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_039 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_040 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_040
+				}
+			}
+			set_local_variable = { name = zibei_id value = 40 }
+			set_global_variable = { name = zibei_cd_female_040 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_040 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_041 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_041
+				}
+			}
+			set_local_variable = { name = zibei_id value = 41 }
+			set_global_variable = { name = zibei_cd_female_041 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_041 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_042 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_042
+				}
+			}
+			set_local_variable = { name = zibei_id value = 42 }
+			set_global_variable = { name = zibei_cd_female_042 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_042 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_043 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_043
+				}
+			}
+			set_local_variable = { name = zibei_id value = 43 }
+			set_global_variable = { name = zibei_cd_female_043 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_043 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_044 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_044
+				}
+			}
+			set_local_variable = { name = zibei_id value = 44 }
+			set_global_variable = { name = zibei_cd_female_044 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_044 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_045 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_045
+				}
+			}
+			set_local_variable = { name = zibei_id value = 45 }
+			set_global_variable = { name = zibei_cd_female_045 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_045 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_046 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_046
+				}
+			}
+			set_local_variable = { name = zibei_id value = 46 }
+			set_global_variable = { name = zibei_cd_female_046 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_046 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_047 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_047
+				}
+			}
+			set_local_variable = { name = zibei_id value = 47 }
+			set_global_variable = { name = zibei_cd_female_047 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_047 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_048 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_048
+				}
+			}
+			set_local_variable = { name = zibei_id value = 48 }
+			set_global_variable = { name = zibei_cd_female_048 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_048 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_049 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_049
+				}
+			}
+			set_local_variable = { name = zibei_id value = 49 }
+			set_global_variable = { name = zibei_cd_female_049 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_049 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_050 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_050
+				}
+			}
+			set_local_variable = { name = zibei_id value = 50 }
+			set_global_variable = { name = zibei_cd_female_050 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_050 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_051 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_051
+				}
+			}
+			set_local_variable = { name = zibei_id value = 51 }
+			set_global_variable = { name = zibei_cd_female_051 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_051 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_052 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_052
+				}
+			}
+			set_local_variable = { name = zibei_id value = 52 }
+			set_global_variable = { name = zibei_cd_female_052 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_052 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_053 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_053
+				}
+			}
+			set_local_variable = { name = zibei_id value = 53 }
+			set_global_variable = { name = zibei_cd_female_053 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_053 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_054 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_054
+				}
+			}
+			set_local_variable = { name = zibei_id value = 54 }
+			set_global_variable = { name = zibei_cd_female_054 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_054 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_055 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_055
+				}
+			}
+			set_local_variable = { name = zibei_id value = 55 }
+			set_global_variable = { name = zibei_cd_female_055 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_055 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_056 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_056
+				}
+			}
+			set_local_variable = { name = zibei_id value = 56 }
+			set_global_variable = { name = zibei_cd_female_056 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_056 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_057 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_057
+				}
+			}
+			set_local_variable = { name = zibei_id value = 57 }
+			set_global_variable = { name = zibei_cd_female_057 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_057 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_058 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_058
+				}
+			}
+			set_local_variable = { name = zibei_id value = 58 }
+			set_global_variable = { name = zibei_cd_female_058 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_058 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_059 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_059
+				}
+			}
+			set_local_variable = { name = zibei_id value = 59 }
+			set_global_variable = { name = zibei_cd_female_059 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_059 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_060 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_060
+				}
+			}
+			set_local_variable = { name = zibei_id value = 60 }
+			set_global_variable = { name = zibei_cd_female_060 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_060 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_061 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_061
+				}
+			}
+			set_local_variable = { name = zibei_id value = 61 }
+			set_global_variable = { name = zibei_cd_female_061 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_061 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_062 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_062
+				}
+			}
+			set_local_variable = { name = zibei_id value = 62 }
+			set_global_variable = { name = zibei_cd_female_062 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_062 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_063 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_063
+				}
+			}
+			set_local_variable = { name = zibei_id value = 63 }
+			set_global_variable = { name = zibei_cd_female_063 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_063 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_064 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_064
+				}
+			}
+			set_local_variable = { name = zibei_id value = 64 }
+			set_global_variable = { name = zibei_cd_female_064 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_064 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_065 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_065
+				}
+			}
+			set_local_variable = { name = zibei_id value = 65 }
+			set_global_variable = { name = zibei_cd_female_065 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_065 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_066 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_066
+				}
+			}
+			set_local_variable = { name = zibei_id value = 66 }
+			set_global_variable = { name = zibei_cd_female_066 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_066 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_067 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_067
+				}
+			}
+			set_local_variable = { name = zibei_id value = 67 }
+			set_global_variable = { name = zibei_cd_female_067 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_067 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_068 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_068
+				}
+			}
+			set_local_variable = { name = zibei_id value = 68 }
+			set_global_variable = { name = zibei_cd_female_068 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_068 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_069 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_069
+				}
+			}
+			set_local_variable = { name = zibei_id value = 69 }
+			set_global_variable = { name = zibei_cd_female_069 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_069 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_070 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_070
+				}
+			}
+			set_local_variable = { name = zibei_id value = 70 }
+			set_global_variable = { name = zibei_cd_female_070 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_070 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_071 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_071
+				}
+			}
+			set_local_variable = { name = zibei_id value = 71 }
+			set_global_variable = { name = zibei_cd_female_071 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_071 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_072 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_072
+				}
+			}
+			set_local_variable = { name = zibei_id value = 72 }
+			set_global_variable = { name = zibei_cd_female_072 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_072 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_073 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_073
+				}
+			}
+			set_local_variable = { name = zibei_id value = 73 }
+			set_global_variable = { name = zibei_cd_female_073 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_073 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_074 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_074
+				}
+			}
+			set_local_variable = { name = zibei_id value = 74 }
+			set_global_variable = { name = zibei_cd_female_074 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_074 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_075 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_075
+				}
+			}
+			set_local_variable = { name = zibei_id value = 75 }
+			set_global_variable = { name = zibei_cd_female_075 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_075 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_076 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_076
+				}
+			}
+			set_local_variable = { name = zibei_id value = 76 }
+			set_global_variable = { name = zibei_cd_female_076 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_076 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_077 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_077
+				}
+			}
+			set_local_variable = { name = zibei_id value = 77 }
+			set_global_variable = { name = zibei_cd_female_077 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_077 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_078 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_078
+				}
+			}
+			set_local_variable = { name = zibei_id value = 78 }
+			set_global_variable = { name = zibei_cd_female_078 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_078 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_079 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_079
+				}
+			}
+			set_local_variable = { name = zibei_id value = 79 }
+			set_global_variable = { name = zibei_cd_female_079 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_079 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_080 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_080
+				}
+			}
+			set_local_variable = { name = zibei_id value = 80 }
+			set_global_variable = { name = zibei_cd_female_080 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_080 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_081 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_081
+				}
+			}
+			set_local_variable = { name = zibei_id value = 81 }
+			set_global_variable = { name = zibei_cd_female_081 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_081 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_082 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_082
+				}
+			}
+			set_local_variable = { name = zibei_id value = 82 }
+			set_global_variable = { name = zibei_cd_female_082 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_082 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_083 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_083
+				}
+			}
+			set_local_variable = { name = zibei_id value = 83 }
+			set_global_variable = { name = zibei_cd_female_083 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_083 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_084 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_084
+				}
+			}
+			set_local_variable = { name = zibei_id value = 84 }
+			set_global_variable = { name = zibei_cd_female_084 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_084 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_085 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_085
+				}
+			}
+			set_local_variable = { name = zibei_id value = 85 }
+			set_global_variable = { name = zibei_cd_female_085 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_085 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_086 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_086
+				}
+			}
+			set_local_variable = { name = zibei_id value = 86 }
+			set_global_variable = { name = zibei_cd_female_086 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_086 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_087 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_087
+				}
+			}
+			set_local_variable = { name = zibei_id value = 87 }
+			set_global_variable = { name = zibei_cd_female_087 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_087 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_088 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_088
+				}
+			}
+			set_local_variable = { name = zibei_id value = 88 }
+			set_global_variable = { name = zibei_cd_female_088 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_088 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_089 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_089
+				}
+			}
+			set_local_variable = { name = zibei_id value = 89 }
+			set_global_variable = { name = zibei_cd_female_089 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_089 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_090 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_090
+				}
+			}
+			set_local_variable = { name = zibei_id value = 90 }
+			set_global_variable = { name = zibei_cd_female_090 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_090 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_091 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_091
+				}
+			}
+			set_local_variable = { name = zibei_id value = 91 }
+			set_global_variable = { name = zibei_cd_female_091 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_091 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_092 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_092
+				}
+			}
+			set_local_variable = { name = zibei_id value = 92 }
+			set_global_variable = { name = zibei_cd_female_092 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_092 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_093 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_093
+				}
+			}
+			set_local_variable = { name = zibei_id value = 93 }
+			set_global_variable = { name = zibei_cd_female_093 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_093 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_094 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_094
+				}
+			}
+			set_local_variable = { name = zibei_id value = 94 }
+			set_global_variable = { name = zibei_cd_female_094 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_094 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_095 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_095
+				}
+			}
+			set_local_variable = { name = zibei_id value = 95 }
+			set_global_variable = { name = zibei_cd_female_095 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_095 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_096 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_096
+				}
+			}
+			set_local_variable = { name = zibei_id value = 96 }
+			set_global_variable = { name = zibei_cd_female_096 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_096 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_097 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_097
+				}
+			}
+			set_local_variable = { name = zibei_id value = 97 }
+			set_global_variable = { name = zibei_cd_female_097 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_097 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_098 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_098
+				}
+			}
+			set_local_variable = { name = zibei_id value = 98 }
+			set_global_variable = { name = zibei_cd_female_098 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_098 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_099 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_099
+				}
+			}
+			set_local_variable = { name = zibei_id value = 99 }
+			set_global_variable = { name = zibei_cd_female_099 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_099 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_100 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_100
+				}
+			}
+			set_local_variable = { name = zibei_id value = 100 }
+			set_global_variable = { name = zibei_cd_female_100 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_100 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_101 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_101
+				}
+			}
+			set_local_variable = { name = zibei_id value = 101 }
+			set_global_variable = { name = zibei_cd_female_101 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_101 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_102 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_102
+				}
+			}
+			set_local_variable = { name = zibei_id value = 102 }
+			set_global_variable = { name = zibei_cd_female_102 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_102 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_103 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_103
+				}
+			}
+			set_local_variable = { name = zibei_id value = 103 }
+			set_global_variable = { name = zibei_cd_female_103 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_103 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_104 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_104
+				}
+			}
+			set_local_variable = { name = zibei_id value = 104 }
+			set_global_variable = { name = zibei_cd_female_104 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_104 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_105 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_105
+				}
+			}
+			set_local_variable = { name = zibei_id value = 105 }
+			set_global_variable = { name = zibei_cd_female_105 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_105 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_106 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_106
+				}
+			}
+			set_local_variable = { name = zibei_id value = 106 }
+			set_global_variable = { name = zibei_cd_female_106 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_106 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_107 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_107
+				}
+			}
+			set_local_variable = { name = zibei_id value = 107 }
+			set_global_variable = { name = zibei_cd_female_107 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_107 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_108 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_108
+				}
+			}
+			set_local_variable = { name = zibei_id value = 108 }
+			set_global_variable = { name = zibei_cd_female_108 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_108 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_109 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_109
+				}
+			}
+			set_local_variable = { name = zibei_id value = 109 }
+			set_global_variable = { name = zibei_cd_female_109 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_109 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_110 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_110
+				}
+			}
+			set_local_variable = { name = zibei_id value = 110 }
+			set_global_variable = { name = zibei_cd_female_110 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_110 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_111 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_111
+				}
+			}
+			set_local_variable = { name = zibei_id value = 111 }
+			set_global_variable = { name = zibei_cd_female_111 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_111 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_112 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_112
+				}
+			}
+			set_local_variable = { name = zibei_id value = 112 }
+			set_global_variable = { name = zibei_cd_female_112 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_112 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_113 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_113
+				}
+			}
+			set_local_variable = { name = zibei_id value = 113 }
+			set_global_variable = { name = zibei_cd_female_113 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_113 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_114 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_114
+				}
+			}
+			set_local_variable = { name = zibei_id value = 114 }
+			set_global_variable = { name = zibei_cd_female_114 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_114 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_115 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_115
+				}
+			}
+			set_local_variable = { name = zibei_id value = 115 }
+			set_global_variable = { name = zibei_cd_female_115 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_115 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_116 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_116
+				}
+			}
+			set_local_variable = { name = zibei_id value = 116 }
+			set_global_variable = { name = zibei_cd_female_116 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_116 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_117 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_117
+				}
+			}
+			set_local_variable = { name = zibei_id value = 117 }
+			set_global_variable = { name = zibei_cd_female_117 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_117 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_118 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_118
+				}
+			}
+			set_local_variable = { name = zibei_id value = 118 }
+			set_global_variable = { name = zibei_cd_female_118 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_118 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_119 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_119
+				}
+			}
+			set_local_variable = { name = zibei_id value = 119 }
+			set_global_variable = { name = zibei_cd_female_119 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_119 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_120 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_120
+				}
+			}
+			set_local_variable = { name = zibei_id value = 120 }
+			set_global_variable = { name = zibei_cd_female_120 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_120 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_121 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_121
+				}
+			}
+			set_local_variable = { name = zibei_id value = 121 }
+			set_global_variable = { name = zibei_cd_female_121 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_121 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_122 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_122
+				}
+			}
+			set_local_variable = { name = zibei_id value = 122 }
+			set_global_variable = { name = zibei_cd_female_122 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_122 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_123 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_123
+				}
+			}
+			set_local_variable = { name = zibei_id value = 123 }
+			set_global_variable = { name = zibei_cd_female_123 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_123 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_124 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_124
+				}
+			}
+			set_local_variable = { name = zibei_id value = 124 }
+			set_global_variable = { name = zibei_cd_female_124 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_124 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_125 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_125
+				}
+			}
+			set_local_variable = { name = zibei_id value = 125 }
+			set_global_variable = { name = zibei_cd_female_125 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_125 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_126 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_126
+				}
+			}
+			set_local_variable = { name = zibei_id value = 126 }
+			set_global_variable = { name = zibei_cd_female_126 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_126 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_127 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_127
+				}
+			}
+			set_local_variable = { name = zibei_id value = 127 }
+			set_global_variable = { name = zibei_cd_female_127 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_127 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_128 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_128
+				}
+			}
+			set_local_variable = { name = zibei_id value = 128 }
+			set_global_variable = { name = zibei_cd_female_128 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_128 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_129 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_129
+				}
+			}
+			set_local_variable = { name = zibei_id value = 129 }
+			set_global_variable = { name = zibei_cd_female_129 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_129 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_130 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_130
+				}
+			}
+			set_local_variable = { name = zibei_id value = 130 }
+			set_global_variable = { name = zibei_cd_female_130 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_130 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_131 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_131
+				}
+			}
+			set_local_variable = { name = zibei_id value = 131 }
+			set_global_variable = { name = zibei_cd_female_131 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_131 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_132 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_132
+				}
+			}
+			set_local_variable = { name = zibei_id value = 132 }
+			set_global_variable = { name = zibei_cd_female_132 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_132 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_133 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_133
+				}
+			}
+			set_local_variable = { name = zibei_id value = 133 }
+			set_global_variable = { name = zibei_cd_female_133 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_133 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_134 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_134
+				}
+			}
+			set_local_variable = { name = zibei_id value = 134 }
+			set_global_variable = { name = zibei_cd_female_134 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_134 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_135 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_135
+				}
+			}
+			set_local_variable = { name = zibei_id value = 135 }
+			set_global_variable = { name = zibei_cd_female_135 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_135 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_136 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_136
+				}
+			}
+			set_local_variable = { name = zibei_id value = 136 }
+			set_global_variable = { name = zibei_cd_female_136 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_136 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_137 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_137
+				}
+			}
+			set_local_variable = { name = zibei_id value = 137 }
+			set_global_variable = { name = zibei_cd_female_137 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_137 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_138 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_138
+				}
+			}
+			set_local_variable = { name = zibei_id value = 138 }
+			set_global_variable = { name = zibei_cd_female_138 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_138 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_139 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_139
+				}
+			}
+			set_local_variable = { name = zibei_id value = 139 }
+			set_global_variable = { name = zibei_cd_female_139 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_139 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_140 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_140
+				}
+			}
+			set_local_variable = { name = zibei_id value = 140 }
+			set_global_variable = { name = zibei_cd_female_140 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_140 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_141 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_141
+				}
+			}
+			set_local_variable = { name = zibei_id value = 141 }
+			set_global_variable = { name = zibei_cd_female_141 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_141 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_142 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_142
+				}
+			}
+			set_local_variable = { name = zibei_id value = 142 }
+			set_global_variable = { name = zibei_cd_female_142 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_142 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_143 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_143
+				}
+			}
+			set_local_variable = { name = zibei_id value = 143 }
+			set_global_variable = { name = zibei_cd_female_143 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_143 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_144 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_144
+				}
+			}
+			set_local_variable = { name = zibei_id value = 144 }
+			set_global_variable = { name = zibei_cd_female_144 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_144 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_145 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_145
+				}
+			}
+			set_local_variable = { name = zibei_id value = 145 }
+			set_global_variable = { name = zibei_cd_female_145 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_145 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_146 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_146
+				}
+			}
+			set_local_variable = { name = zibei_id value = 146 }
+			set_global_variable = { name = zibei_cd_female_146 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_146 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_147 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_147
+				}
+			}
+			set_local_variable = { name = zibei_id value = 147 }
+			set_global_variable = { name = zibei_cd_female_147 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_147 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_148 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_148
+				}
+			}
+			set_local_variable = { name = zibei_id value = 148 }
+			set_global_variable = { name = zibei_cd_female_148 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_148 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_149 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_149
+				}
+			}
+			set_local_variable = { name = zibei_id value = 149 }
+			set_global_variable = { name = zibei_cd_female_149 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_149 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_150 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_150
+				}
+			}
+			set_local_variable = { name = zibei_id value = 150 }
+			set_global_variable = { name = zibei_cd_female_150 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_150 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_151 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_151
+				}
+			}
+			set_local_variable = { name = zibei_id value = 151 }
+			set_global_variable = { name = zibei_cd_female_151 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_151 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_152 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_152
+				}
+			}
+			set_local_variable = { name = zibei_id value = 152 }
+			set_global_variable = { name = zibei_cd_female_152 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_152 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_153 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_153
+				}
+			}
+			set_local_variable = { name = zibei_id value = 153 }
+			set_global_variable = { name = zibei_cd_female_153 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_153 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_154 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_154
+				}
+			}
+			set_local_variable = { name = zibei_id value = 154 }
+			set_global_variable = { name = zibei_cd_female_154 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_154 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_155 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_155
+				}
+			}
+			set_local_variable = { name = zibei_id value = 155 }
+			set_global_variable = { name = zibei_cd_female_155 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_155 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_156 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_156
+				}
+			}
+			set_local_variable = { name = zibei_id value = 156 }
+			set_global_variable = { name = zibei_cd_female_156 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_156 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_157 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_157
+				}
+			}
+			set_local_variable = { name = zibei_id value = 157 }
+			set_global_variable = { name = zibei_cd_female_157 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_157 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_158 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_158
+				}
+			}
+			set_local_variable = { name = zibei_id value = 158 }
+			set_global_variable = { name = zibei_cd_female_158 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_158 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_159 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_159
+				}
+			}
+			set_local_variable = { name = zibei_id value = 159 }
+			set_global_variable = { name = zibei_cd_female_159 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_159 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_160 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_160
+				}
+			}
+			set_local_variable = { name = zibei_id value = 160 }
+			set_global_variable = { name = zibei_cd_female_160 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_160 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_161 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_161
+				}
+			}
+			set_local_variable = { name = zibei_id value = 161 }
+			set_global_variable = { name = zibei_cd_female_161 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_161 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_162 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_162
+				}
+			}
+			set_local_variable = { name = zibei_id value = 162 }
+			set_global_variable = { name = zibei_cd_female_162 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_162 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_163 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_163
+				}
+			}
+			set_local_variable = { name = zibei_id value = 163 }
+			set_global_variable = { name = zibei_cd_female_163 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_163 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_164 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_164
+				}
+			}
+			set_local_variable = { name = zibei_id value = 164 }
+			set_global_variable = { name = zibei_cd_female_164 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_164 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_165 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_165
+				}
+			}
+			set_local_variable = { name = zibei_id value = 165 }
+			set_global_variable = { name = zibei_cd_female_165 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_165 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_166 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_166
+				}
+			}
+			set_local_variable = { name = zibei_id value = 166 }
+			set_global_variable = { name = zibei_cd_female_166 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_166 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_167 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_167
+				}
+			}
+			set_local_variable = { name = zibei_id value = 167 }
+			set_global_variable = { name = zibei_cd_female_167 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_167 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_168 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_168
+				}
+			}
+			set_local_variable = { name = zibei_id value = 168 }
+			set_global_variable = { name = zibei_cd_female_168 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_168 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_169 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_169
+				}
+			}
+			set_local_variable = { name = zibei_id value = 169 }
+			set_global_variable = { name = zibei_cd_female_169 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_169 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_170 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_170
+				}
+			}
+			set_local_variable = { name = zibei_id value = 170 }
+			set_global_variable = { name = zibei_cd_female_170 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_170 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_171 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_171
+				}
+			}
+			set_local_variable = { name = zibei_id value = 171 }
+			set_global_variable = { name = zibei_cd_female_171 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_171 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_172 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_172
+				}
+			}
+			set_local_variable = { name = zibei_id value = 172 }
+			set_global_variable = { name = zibei_cd_female_172 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_172 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_173 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_173
+				}
+			}
+			set_local_variable = { name = zibei_id value = 173 }
+			set_global_variable = { name = zibei_cd_female_173 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_173 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_174 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_174
+				}
+			}
+			set_local_variable = { name = zibei_id value = 174 }
+			set_global_variable = { name = zibei_cd_female_174 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_174 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_175 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_175
+				}
+			}
+			set_local_variable = { name = zibei_id value = 175 }
+			set_global_variable = { name = zibei_cd_female_175 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_175 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_176 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_176
+				}
+			}
+			set_local_variable = { name = zibei_id value = 176 }
+			set_global_variable = { name = zibei_cd_female_176 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_176 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_177 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_177
+				}
+			}
+			set_local_variable = { name = zibei_id value = 177 }
+			set_global_variable = { name = zibei_cd_female_177 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_177 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_178 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_178
+				}
+			}
+			set_local_variable = { name = zibei_id value = 178 }
+			set_global_variable = { name = zibei_cd_female_178 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_178 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_179 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_179
+				}
+			}
+			set_local_variable = { name = zibei_id value = 179 }
+			set_global_variable = { name = zibei_cd_female_179 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_179 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_180 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_180
+				}
+			}
+			set_local_variable = { name = zibei_id value = 180 }
+			set_global_variable = { name = zibei_cd_female_180 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_180 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_181 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_181
+				}
+			}
+			set_local_variable = { name = zibei_id value = 181 }
+			set_global_variable = { name = zibei_cd_female_181 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_181 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_182 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_182
+				}
+			}
+			set_local_variable = { name = zibei_id value = 182 }
+			set_global_variable = { name = zibei_cd_female_182 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_182 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_183 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_183
+				}
+			}
+			set_local_variable = { name = zibei_id value = 183 }
+			set_global_variable = { name = zibei_cd_female_183 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_183 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_184 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_184
+				}
+			}
+			set_local_variable = { name = zibei_id value = 184 }
+			set_global_variable = { name = zibei_cd_female_184 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_184 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_185 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_185
+				}
+			}
+			set_local_variable = { name = zibei_id value = 185 }
+			set_global_variable = { name = zibei_cd_female_185 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_185 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_186 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_186
+				}
+			}
+			set_local_variable = { name = zibei_id value = 186 }
+			set_global_variable = { name = zibei_cd_female_186 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_186 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_187 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_187
+				}
+			}
+			set_local_variable = { name = zibei_id value = 187 }
+			set_global_variable = { name = zibei_cd_female_187 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_187 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_188 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_188
+				}
+			}
+			set_local_variable = { name = zibei_id value = 188 }
+			set_global_variable = { name = zibei_cd_female_188 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_188 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_189 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_189
+				}
+			}
+			set_local_variable = { name = zibei_id value = 189 }
+			set_global_variable = { name = zibei_cd_female_189 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_189 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_190 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_190
+				}
+			}
+			set_local_variable = { name = zibei_id value = 190 }
+			set_global_variable = { name = zibei_cd_female_190 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_190 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_191 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_191
+				}
+			}
+			set_local_variable = { name = zibei_id value = 191 }
+			set_global_variable = { name = zibei_cd_female_191 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_191 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_192 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_192
+				}
+			}
+			set_local_variable = { name = zibei_id value = 192 }
+			set_global_variable = { name = zibei_cd_female_192 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_192 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_193 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_193
+				}
+			}
+			set_local_variable = { name = zibei_id value = 193 }
+			set_global_variable = { name = zibei_cd_female_193 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_193 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_194 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_194
+				}
+			}
+			set_local_variable = { name = zibei_id value = 194 }
+			set_global_variable = { name = zibei_cd_female_194 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_194 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_195 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_195
+				}
+			}
+			set_local_variable = { name = zibei_id value = 195 }
+			set_global_variable = { name = zibei_cd_female_195 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_195 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_196 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_196
+				}
+			}
+			set_local_variable = { name = zibei_id value = 196 }
+			set_global_variable = { name = zibei_cd_female_196 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_196 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_197 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_197
+				}
+			}
+			set_local_variable = { name = zibei_id value = 197 }
+			set_global_variable = { name = zibei_cd_female_197 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_197 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_198 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_198
+				}
+			}
+			set_local_variable = { name = zibei_id value = 198 }
+			set_global_variable = { name = zibei_cd_female_198 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_198 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_199 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_199
+				}
+			}
+			set_local_variable = { name = zibei_id value = 199 }
+			set_global_variable = { name = zibei_cd_female_199 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_199 add = local_var:zibei_cd_len }
+		}
+		1 = {
+			trigger = {
+				OR = {
+					NOT = { has_global_variable = zibei_cd_female_200 }
+					global_var:zibei_step_female >= global_var:zibei_cd_female_200
+				}
+			}
+			set_local_variable = { name = zibei_id value = 200 }
+			set_global_variable = { name = zibei_cd_female_200 value = global_var:zibei_step_female }
+			change_global_variable = { name = zibei_cd_female_200 add = local_var:zibei_cd_len }
+		}
+	}
+}
+
+# ==========================================================
+# 五、 极简赋名映射宏（使用无点号单键名，彻底通过 PostValidate 校验）
+# ==========================================================
+
+# 1. 100字通用/偏旁池赋名映射
+zibei_assign_name = {
+	if = {      limit = { local_var:zibei_id = 1 }   set_first_name = $ZIBEI$_$POOL$_001 }
+	else_if = { limit = { local_var:zibei_id = 2 }   set_first_name = $ZIBEI$_$POOL$_002 }
+	else_if = { limit = { local_var:zibei_id = 3 }   set_first_name = $ZIBEI$_$POOL$_003 }
+	else_if = { limit = { local_var:zibei_id = 4 }   set_first_name = $ZIBEI$_$POOL$_004 }
+	else_if = { limit = { local_var:zibei_id = 5 }   set_first_name = $ZIBEI$_$POOL$_005 }
+	else_if = { limit = { local_var:zibei_id = 6 }   set_first_name = $ZIBEI$_$POOL$_006 }
+	else_if = { limit = { local_var:zibei_id = 7 }   set_first_name = $ZIBEI$_$POOL$_007 }
+	else_if = { limit = { local_var:zibei_id = 8 }   set_first_name = $ZIBEI$_$POOL$_008 }
+	else_if = { limit = { local_var:zibei_id = 9 }   set_first_name = $ZIBEI$_$POOL$_009 }
+	else_if = { limit = { local_var:zibei_id = 10 }  set_first_name = $ZIBEI$_$POOL$_010 }
+	else_if = { limit = { local_var:zibei_id = 11 }  set_first_name = $ZIBEI$_$POOL$_011 }
+	else_if = { limit = { local_var:zibei_id = 12 }  set_first_name = $ZIBEI$_$POOL$_012 }
+	else_if = { limit = { local_var:zibei_id = 13 }  set_first_name = $ZIBEI$_$POOL$_013 }
+	else_if = { limit = { local_var:zibei_id = 14 }  set_first_name = $ZIBEI$_$POOL$_014 }
+	else_if = { limit = { local_var:zibei_id = 15 }  set_first_name = $ZIBEI$_$POOL$_015 }
+	else_if = { limit = { local_var:zibei_id = 16 }  set_first_name = $ZIBEI$_$POOL$_016 }
+	else_if = { limit = { local_var:zibei_id = 17 }  set_first_name = $ZIBEI$_$POOL$_017 }
+	else_if = { limit = { local_var:zibei_id = 18 }  set_first_name = $ZIBEI$_$POOL$_018 }
+	else_if = { limit = { local_var:zibei_id = 19 }  set_first_name = $ZIBEI$_$POOL$_019 }
+	else_if = { limit = { local_var:zibei_id = 20 }  set_first_name = $ZIBEI$_$POOL$_020 }
+	else_if = { limit = { local_var:zibei_id = 21 }  set_first_name = $ZIBEI$_$POOL$_021 }
+	else_if = { limit = { local_var:zibei_id = 22 }  set_first_name = $ZIBEI$_$POOL$_022 }
+	else_if = { limit = { local_var:zibei_id = 23 }  set_first_name = $ZIBEI$_$POOL$_023 }
+	else_if = { limit = { local_var:zibei_id = 24 }  set_first_name = $ZIBEI$_$POOL$_024 }
+	else_if = { limit = { local_var:zibei_id = 25 }  set_first_name = $ZIBEI$_$POOL$_025 }
+	else_if = { limit = { local_var:zibei_id = 26 }  set_first_name = $ZIBEI$_$POOL$_026 }
+	else_if = { limit = { local_var:zibei_id = 27 }  set_first_name = $ZIBEI$_$POOL$_027 }
+	else_if = { limit = { local_var:zibei_id = 28 }  set_first_name = $ZIBEI$_$POOL$_028 }
+	else_if = { limit = { local_var:zibei_id = 29 }  set_first_name = $ZIBEI$_$POOL$_029 }
+	else_if = { limit = { local_var:zibei_id = 30 }  set_first_name = $ZIBEI$_$POOL$_030 }
+	else_if = { limit = { local_var:zibei_id = 31 }  set_first_name = $ZIBEI$_$POOL$_031 }
+	else_if = { limit = { local_var:zibei_id = 32 }  set_first_name = $ZIBEI$_$POOL$_032 }
+	else_if = { limit = { local_var:zibei_id = 33 }  set_first_name = $ZIBEI$_$POOL$_033 }
+	else_if = { limit = { local_var:zibei_id = 34 }  set_first_name = $ZIBEI$_$POOL$_034 }
+	else_if = { limit = { local_var:zibei_id = 35 }  set_first_name = $ZIBEI$_$POOL$_035 }
+	else_if = { limit = { local_var:zibei_id = 36 }  set_first_name = $ZIBEI$_$POOL$_036 }
+	else_if = { limit = { local_var:zibei_id = 37 }  set_first_name = $ZIBEI$_$POOL$_037 }
+	else_if = { limit = { local_var:zibei_id = 38 }  set_first_name = $ZIBEI$_$POOL$_038 }
+	else_if = { limit = { local_var:zibei_id = 39 }  set_first_name = $ZIBEI$_$POOL$_039 }
+	else_if = { limit = { local_var:zibei_id = 40 }  set_first_name = $ZIBEI$_$POOL$_040 }
+	else_if = { limit = { local_var:zibei_id = 41 }  set_first_name = $ZIBEI$_$POOL$_041 }
+	else_if = { limit = { local_var:zibei_id = 42 }  set_first_name = $ZIBEI$_$POOL$_042 }
+	else_if = { limit = { local_var:zibei_id = 43 }  set_first_name = $ZIBEI$_$POOL$_043 }
+	else_if = { limit = { local_var:zibei_id = 44 }  set_first_name = $ZIBEI$_$POOL$_044 }
+	else_if = { limit = { local_var:zibei_id = 45 }  set_first_name = $ZIBEI$_$POOL$_045 }
+	else_if = { limit = { local_var:zibei_id = 46 }  set_first_name = $ZIBEI$_$POOL$_046 }
+	else_if = { limit = { local_var:zibei_id = 47 }  set_first_name = $ZIBEI$_$POOL$_047 }
+	else_if = { limit = { local_var:zibei_id = 48 }  set_first_name = $ZIBEI$_$POOL$_048 }
+	else_if = { limit = { local_var:zibei_id = 49 }  set_first_name = $ZIBEI$_$POOL$_049 }
+	else_if = { limit = { local_var:zibei_id = 50 }  set_first_name = $ZIBEI$_$POOL$_050 }
+	else_if = { limit = { local_var:zibei_id = 51 }  set_first_name = $ZIBEI$_$POOL$_051 }
+	else_if = { limit = { local_var:zibei_id = 52 }  set_first_name = $ZIBEI$_$POOL$_052 }
+	else_if = { limit = { local_var:zibei_id = 53 }  set_first_name = $ZIBEI$_$POOL$_053 }
+	else_if = { limit = { local_var:zibei_id = 54 }  set_first_name = $ZIBEI$_$POOL$_054 }
+	else_if = { limit = { local_var:zibei_id = 55 }  set_first_name = $ZIBEI$_$POOL$_055 }
+	else_if = { limit = { local_var:zibei_id = 56 }  set_first_name = $ZIBEI$_$POOL$_056 }
+	else_if = { limit = { local_var:zibei_id = 57 }  set_first_name = $ZIBEI$_$POOL$_057 }
+	else_if = { limit = { local_var:zibei_id = 58 }  set_first_name = $ZIBEI$_$POOL$_058 }
+	else_if = { limit = { local_var:zibei_id = 59 }  set_first_name = $ZIBEI$_$POOL$_059 }
+	else_if = { limit = { local_var:zibei_id = 60 }  set_first_name = $ZIBEI$_$POOL$_060 }
+	else_if = { limit = { local_var:zibei_id = 61 }  set_first_name = $ZIBEI$_$POOL$_061 }
+	else_if = { limit = { local_var:zibei_id = 62 }  set_first_name = $ZIBEI$_$POOL$_062 }
+	else_if = { limit = { local_var:zibei_id = 63 }  set_first_name = $ZIBEI$_$POOL$_063 }
+	else_if = { limit = { local_var:zibei_id = 64 }  set_first_name = $ZIBEI$_$POOL$_064 }
+	else_if = { limit = { local_var:zibei_id = 65 }  set_first_name = $ZIBEI$_$POOL$_065 }
+	else_if = { limit = { local_var:zibei_id = 66 }  set_first_name = $ZIBEI$_$POOL$_066 }
+	else_if = { limit = { local_var:zibei_id = 67 }  set_first_name = $ZIBEI$_$POOL$_067 }
+	else_if = { limit = { local_var:zibei_id = 68 }  set_first_name = $ZIBEI$_$POOL$_068a }
+	else_if = { limit = { local_var:zibei_id = 69 }  set_first_name = $ZIBEI$_$POOL$_069 }
+	else_if = { limit = { local_var:zibei_id = 70 }  set_first_name = $ZIBEI$_$POOL$_070 }
+	else_if = { limit = { local_var:zibei_id = 71 }  set_first_name = $ZIBEI$_$POOL$_071 }
+	else_if = { limit = { local_var:zibei_id = 72 }  set_first_name = $ZIBEI$_$POOL$_072 }
+	else_if = { limit = { local_var:zibei_id = 73 }  set_first_name = $ZIBEI$_$POOL$_073 }
+	else_if = { limit = { local_var:zibei_id = 74 }  set_first_name = $ZIBEI$_$POOL$_074 }
+	else_if = { limit = { local_var:zibei_id = 75 }  set_first_name = $ZIBEI$_$POOL$_075 }
+	else_if = { limit = { local_var:zibei_id = 76 }  set_first_name = $ZIBEI$_$POOL$_076 }
+	else_if = { limit = { local_var:zibei_id = 77 }  set_first_name = $ZIBEI$_$POOL$_077 }
+	else_if = { limit = { local_var:zibei_id = 78 }  set_first_name = $ZIBEI$_$POOL$_078 }
+	else_if = { limit = { local_var:zibei_id = 79 }  set_first_name = $ZIBEI$_$POOL$_079 }
+	else_if = { limit = { local_var:zibei_id = 80 }  set_first_name = $ZIBEI$_$POOL$_080 }
+	else_if = { limit = { local_var:zibei_id = 81 }  set_first_name = $ZIBEI$_$POOL$_081 }
+	else_if = { limit = { local_var:zibei_id = 82 }  set_first_name = $ZIBEI$_$POOL$_082 }
+	else_if = { limit = { local_var:zibei_id = 83 }  set_first_name = $ZIBEI$_$POOL$_083 }
+	else_if = { limit = { local_var:zibei_id = 84 }  set_first_name = $ZIBEI$_$POOL$_084 }
+	else_if = { limit = { local_var:zibei_id = 85 }  set_first_name = $ZIBEI$_$POOL$_085 }
+	else_if = { limit = { local_var:zibei_id = 86 }  set_first_name = $ZIBEI$_$POOL$_086 }
+	else_if = { limit = { local_var:zibei_id = 87 }  set_first_name = $ZIBEI$_$POOL$_087 }
+	else_if = { limit = { local_var:zibei_id = 88 }  set_first_name = $ZIBEI$_$POOL$_088 }
+	else_if = { limit = { local_var:zibei_id = 89 }  set_first_name = $ZIBEI$_$POOL$_089 }
+	else_if = { limit = { local_var:zibei_id = 90 }  set_first_name = $ZIBEI$_$POOL$_090 }
+	else_if = { limit = { local_var:zibei_id = 91 }  set_first_name = $ZIBEI$_$POOL$_091 }
+	else_if = { limit = { local_var:zibei_id = 92 }  set_first_name = $ZIBEI$_$POOL$_092 }
+	else_if = { limit = { local_var:zibei_id = 93 }  set_first_name = $ZIBEI$_$POOL$_093 }
+	else_if = { limit = { local_var:zibei_id = 94 }  set_first_name = $ZIBEI$_$POOL$_094 }
+	else_if = { limit = { local_var:zibei_id = 95 }  set_first_name = $ZIBEI$_$POOL$_095 }
+	else_if = { limit = { local_var:zibei_id = 96 }  set_first_name = $ZIBEI$_$POOL$_096 }
+	else_if = { limit = { local_var:zibei_id = 97 }  set_first_name = $ZIBEI$_$POOL$_097 }
+	else_if = { limit = { local_var:zibei_id = 98 }  set_first_name = $ZIBEI$_$POOL$_098 }
+	else_if = { limit = { local_var:zibei_id = 99 }  set_first_name = $ZIBEI$_$POOL$_099 }
+	else_if = { limit = { local_var:zibei_id = 100 } set_first_name = $ZIBEI$_$POOL$_100 }
+}
+
+# 2. 200字女性专属池赋名映射
+zibei_assign_female_name = {
+	if = {      limit = { local_var:zibei_id = 1 }   set_first_name = $ZIBEI$_female_001 }
+	else_if = { limit = { local_var:zibei_id = 2 }   set_first_name = $ZIBEI$_female_002 }
+	else_if = { limit = { local_var:zibei_id = 3 }   set_first_name = $ZIBEI$_female_003 }
+	else_if = { limit = { local_var:zibei_id = 4 }   set_first_name = $ZIBEI$_female_004 }
+	else_if = { limit = { local_var:zibei_id = 5 }   set_first_name = $ZIBEI$_female_005 }
+	else_if = { limit = { local_var:zibei_id = 6 }   set_first_name = $ZIBEI$_female_006 }
+	else_if = { limit = { local_var:zibei_id = 7 }   set_first_name = $ZIBEI$_female_007 }
+	else_if = { limit = { local_var:zibei_id = 8 }   set_first_name = $ZIBEI$_female_008 }
+	else_if = { limit = { local_var:zibei_id = 9 }   set_first_name = $ZIBEI$_female_009 }
+	else_if = { limit = { local_var:zibei_id = 10 }  set_first_name = $ZIBEI$_female_010 }
+	else_if = { limit = { local_var:zibei_id = 11 }  set_first_name = $ZIBEI$_female_011 }
+	else_if = { limit = { local_var:zibei_id = 12 }  set_first_name = $ZIBEI$_female_012 }
+	else_if = { limit = { local_var:zibei_id = 13 }  set_first_name = $ZIBEI$_female_013 }
+	else_if = { limit = { local_var:zibei_id = 14 }  set_first_name = $ZIBEI$_female_014 }
+	else_if = { limit = { local_var:zibei_id = 15 }  set_first_name = $ZIBEI$_female_015 }
+	else_if = { limit = { local_var:zibei_id = 16 }  set_first_name = $ZIBEI$_female_016 }
+	else_if = { limit = { local_var:zibei_id = 17 }  set_first_name = $ZIBEI$_female_017 }
+	else_if = { limit = { local_var:zibei_id = 18 }  set_first_name = $ZIBEI$_female_018 }
+	else_if = { limit = { local_var:zibei_id = 19 }  set_first_name = $ZIBEI$_female_019 }
+	else_if = { limit = { local_var:zibei_id = 20 }  set_first_name = $ZIBEI$_female_020 }
+	else_if = { limit = { local_var:zibei_id = 21 }  set_first_name = $ZIBEI$_female_021 }
+	else_if = { limit = { local_var:zibei_id = 22 }  set_first_name = $ZIBEI$_female_022 }
+	else_if = { limit = { local_var:zibei_id = 23 }  set_first_name = $ZIBEI$_female_023 }
+	else_if = { limit = { local_var:zibei_id = 24 }  set_first_name = $ZIBEI$_female_024 }
+	else_if = { limit = { local_var:zibei_id = 25 }  set_first_name = $ZIBEI$_female_025 }
+	else_if = { limit = { local_var:zibei_id = 26 }  set_first_name = $ZIBEI$_female_026 }
+	else_if = { limit = { local_var:zibei_id = 27 }  set_first_name = $ZIBEI$_female_027 }
+	else_if = { limit = { local_var:zibei_id = 28 }  set_first_name = $ZIBEI$_female_028 }
+	else_if = { limit = { local_var:zibei_id = 29 }  set_first_name = $ZIBEI$_female_029 }
+	else_if = { limit = { local_var:zibei_id = 30 }  set_first_name = $ZIBEI$_female_030 }
+	else_if = { limit = { local_var:zibei_id = 31 }  set_first_name = $ZIBEI$_female_031 }
+	else_if = { limit = { local_var:zibei_id = 32 }  set_first_name = $ZIBEI$_female_032 }
+	else_if = { limit = { local_var:zibei_id = 33 }  set_first_name = $ZIBEI$_female_033 }
+	else_if = { limit = { local_var:zibei_id = 34 }  set_first_name = $ZIBEI$_female_034 }
+	else_if = { limit = { local_var:zibei_id = 35 }  set_first_name = $ZIBEI$_female_035 }
+	else_if = { limit = { local_var:zibei_id = 36 }  set_first_name = $ZIBEI$_female_036 }
+	else_if = { limit = { local_var:zibei_id = 37 }  set_first_name = $ZIBEI$_female_037 }
+	else_if = { limit = { local_var:zibei_id = 38 }  set_first_name = $ZIBEI$_female_038 }
+	else_if = { limit = { local_var:zibei_id = 39 }  set_first_name = $ZIBEI$_female_039 }
+	else_if = { limit = { local_var:zibei_id = 40 }  set_first_name = $ZIBEI$_female_040 }
+	else_if = { limit = { local_var:zibei_id = 41 }  set_first_name = $ZIBEI$_female_041 }
+	else_if = { limit = { local_var:zibei_id = 42 }  set_first_name = $ZIBEI$_female_042 }
+	else_if = { limit = { local_var:zibei_id = 43 }  set_first_name = $ZIBEI$_female_043 }
+	else_if = { limit = { local_var:zibei_id = 44 }  set_first_name = $ZIBEI$_female_044 }
+	else_if = { limit = { local_var:zibei_id = 45 }  set_first_name = $ZIBEI$_female_045 }
+	else_if = { limit = { local_var:zibei_id = 46 }  set_first_name = $ZIBEI$_female_046 }
+	else_if = { limit = { local_var:zibei_id = 47 }  set_first_name = $ZIBEI$_female_047 }
+	else_if = { limit = { local_var:zibei_id = 48 }  set_first_name = $ZIBEI$_female_048 }
+	else_if = { limit = { local_var:zibei_id = 49 }  set_first_name = $ZIBEI$_female_049 }
+	else_if = { limit = { local_var:zibei_id = 50 }  set_first_name = $ZIBEI$_female_050 }
+	else_if = { limit = { local_var:zibei_id = 51 }  set_first_name = $ZIBEI$_female_051 }
+	else_if = { limit = { local_var:zibei_id = 52 }  set_first_name = $ZIBEI$_female_052 }
+	else_if = { limit = { local_var:zibei_id = 53 }  set_first_name = $ZIBEI$_female_053 }
+	else_if = { limit = { local_var:zibei_id = 54 }  set_first_name = $ZIBEI$_female_054 }
+	else_if = { limit = { local_var:zibei_id = 55 }  set_first_name = $ZIBEI$_female_055 }
+	else_if = { limit = { local_var:zibei_id = 56 }  set_first_name = $ZIBEI$_female_056 }
+	else_if = { limit = { local_var:zibei_id = 57 }  set_first_name = $ZIBEI$_female_057 }
+	else_if = { limit = { local_var:zibei_id = 58 }  set_first_name = $ZIBEI$_female_058 }
+	else_if = { limit = { local_var:zibei_id = 59 }  set_first_name = $ZIBEI$_female_059 }
+	else_if = { limit = { local_var:zibei_id = 60 }  set_first_name = $ZIBEI$_female_060 }
+	else_if = { limit = { local_var:zibei_id = 61 }  set_first_name = $ZIBEI$_female_061 }
+	else_if = { limit = { local_var:zibei_id = 62 }  set_first_name = $ZIBEI$_female_062 }
+	else_if = { limit = { local_var:zibei_id = 63 }  set_first_name = $ZIBEI$_female_063 }
+	else_if = { limit = { local_var:zibei_id = 64 }  set_first_name = $ZIBEI$_female_064 }
+	else_if = { limit = { local_var:zibei_id = 65 }  set_first_name = $ZIBEI$_female_065 }
+	else_if = { limit = { local_var:zibei_id = 66 }  set_first_name = $ZIBEI$_female_066 }
+	else_if = { limit = { local_var:zibei_id = 67 }  set_first_name = $ZIBEI$_female_067 }
+	else_if = { limit = { local_var:zibei_id = 68 }  set_first_name = $ZIBEI$_female_068 }
+	else_if = { limit = { local_var:zibei_id = 69 }  set_first_name = $ZIBEI$_female_069 }
+	else_if = { limit = { local_var:zibei_id = 70 }  set_first_name = $ZIBEI$_female_070 }
+	else_if = { limit = { local_var:zibei_id = 71 }  set_first_name = $ZIBEI$_female_071 }
+	else_if = { limit = { local_var:zibei_id = 72 }  set_first_name = $ZIBEI$_female_072 }
+	else_if = { limit = { local_var:zibei_id = 73 }  set_first_name = $ZIBEI$_female_073 }
+	else_if = { limit = { local_var:zibei_id = 74 }  set_first_name = $ZIBEI$_female_074 }
+	else_if = { limit = { local_var:zibei_id = 75 }  set_first_name = $ZIBEI$_female_075 }
+	else_if = { limit = { local_var:zibei_id = 76 }  set_first_name = $ZIBEI$_female_076 }
+	else_if = { limit = { local_var:zibei_id = 77 }  set_first_name = $ZIBEI$_female_077 }
+	else_if = { limit = { local_var:zibei_id = 78 }  set_first_name = $ZIBEI$_female_078 }
+	else_if = { limit = { local_var:zibei_id = 79 }  set_first_name = $ZIBEI$_female_079 }
+	else_if = { limit = { local_var:zibei_id = 80 }  set_first_name = $ZIBEI$_female_080 }
+	else_if = { limit = { local_var:zibei_id = 81 }  set_first_name = $ZIBEI$_female_081 }
+	else_if = { limit = { local_var:zibei_id = 82 }  set_first_name = $ZIBEI$_female_082 }
+	else_if = { limit = { local_var:zibei_id = 83 }  set_first_name = $ZIBEI$_female_083 }
+	else_if = { limit = { local_var:zibei_id = 84 }  set_first_name = $ZIBEI$_female_084 }
+	else_if = { limit = { local_var:zibei_id = 85 }  set_first_name = $ZIBEI$_female_085 }
+	else_if = { limit = { local_var:zibei_id = 86 }  set_first_name = $ZIBEI$_female_086 }
+	else_if = { limit = { local_var:zibei_id = 87 }  set_first_name = $ZIBEI$_female_087 }
+	else_if = { limit = { local_var:zibei_id = 88 }  set_first_name = $ZIBEI$_female_088 }
+	else_if = { limit = { local_var:zibei_id = 89 }  set_first_name = $ZIBEI$_female_089 }
+	else_if = { limit = { local_var:zibei_id = 90 }  set_first_name = $ZIBEI$_female_090 }
+	else_if = { limit = { local_var:zibei_id = 91 }  set_first_name = $ZIBEI$_female_091 }
+	else_if = { limit = { local_var:zibei_id = 92 }  set_first_name = $ZIBEI$_female_092 }
+	else_if = { limit = { local_var:zibei_id = 93 }  set_first_name = $ZIBEI$_female_093 }
+	else_if = { limit = { local_var:zibei_id = 94 }  set_first_name = $ZIBEI$_female_094 }
+	else_if = { limit = { local_var:zibei_id = 95 }  set_first_name = $ZIBEI$_female_095 }
+	else_if = { limit = { local_var:zibei_id = 96 }  set_first_name = $ZIBEI$_female_096 }
+	else_if = { limit = { local_var:zibei_id = 97 }  set_first_name = $ZIBEI$_female_097 }
+	else_if = { limit = { local_var:zibei_id = 98 }  set_first_name = $ZIBEI$_female_098 }
+	else_if = { limit = { local_var:zibei_id = 99 }  set_first_name = $ZIBEI$_female_099 }
+	else_if = { limit = { local_var:zibei_id = 100 } set_first_name = $ZIBEI$_female_100 }
+	else_if = { limit = { local_var:zibei_id = 101 } set_first_name = $ZIBEI$_female_101 }
+	else_if = { limit = { local_var:zibei_id = 102 } set_first_name = $ZIBEI$_female_102 }
+	else_if = { limit = { local_var:zibei_id = 103 } set_first_name = $ZIBEI$_female_103 }
+	else_if = { limit = { local_var:zibei_id = 104 } set_first_name = $ZIBEI$_female_104 }
+	else_if = { limit = { local_var:zibei_id = 105 } set_first_name = $ZIBEI$_female_105 }
+	else_if = { limit = { local_var:zibei_id = 106 } set_first_name = $ZIBEI$_female_106 }
+	else_if = { limit = { local_var:zibei_id = 107 } set_first_name = $ZIBEI$_female_107 }
+	else_if = { limit = { local_var:zibei_id = 108 } set_first_name = $ZIBEI$_female_108 }
+	else_if = { limit = { local_var:zibei_id = 109 } set_first_name = $ZIBEI$_female_109 }
+	else_if = { limit = { local_var:zibei_id = 110 } set_first_name = $ZIBEI$_female_110 }
+	else_if = { limit = { local_var:zibei_id = 111 } set_first_name = $ZIBEI$_female_111 }
+	else_if = { limit = { local_var:zibei_id = 112 } set_first_name = $ZIBEI$_female_112 }
+	else_if = { limit = { local_var:zibei_id = 113 } set_first_name = $ZIBEI$_female_113 }
+	else_if = { limit = { local_var:zibei_id = 114 } set_first_name = $ZIBEI$_female_114 }
+	else_if = { limit = { local_var:zibei_id = 115 } set_first_name = $ZIBEI$_female_115 }
+	else_if = { limit = { local_var:zibei_id = 116 } set_first_name = $ZIBEI$_female_116 }
+	else_if = { limit = { local_var:zibei_id = 117 } set_first_name = $ZIBEI$_female_117 }
+	else_if = { limit = { local_var:zibei_id = 118 } set_first_name = $ZIBEI$_female_118 }
+	else_if = { limit = { local_var:zibei_id = 119 } set_first_name = $ZIBEI$_female_119 }
+	else_if = { limit = { local_var:zibei_id = 120 } set_first_name = $ZIBEI$_female_120 }
+	else_if = { limit = { local_var:zibei_id = 121 } set_first_name = $ZIBEI$_female_121 }
+	else_if = { limit = { local_var:zibei_id = 122 } set_first_name = $ZIBEI$_female_122 }
+	else_if = { limit = { local_var:zibei_id = 123 } set_first_name = $ZIBEI$_female_123 }
+	else_if = { limit = { local_var:zibei_id = 124 } set_first_name = $ZIBEI$_female_124 }
+	else_if = { limit = { local_var:zibei_id = 125 } set_first_name = $ZIBEI$_female_125 }
+	else_if = { limit = { local_var:zibei_id = 126 } set_first_name = $ZIBEI$_female_126 }
+	else_if = { limit = { local_var:zibei_id = 127 } set_first_name = $ZIBEI$_female_127 }
+	else_if = { limit = { local_var:zibei_id = 128 } set_first_name = $ZIBEI$_female_128 }
+	else_if = { limit = { local_var:zibei_id = 129 } set_first_name = $ZIBEI$_female_129 }
+	else_if = { limit = { local_var:zibei_id = 130 } set_first_name = $ZIBEI$_female_130 }
+	else_if = { limit = { local_var:zibei_id = 131 } set_first_name = $ZIBEI$_female_131 }
+	else_if = { limit = { local_var:zibei_id = 132 } set_first_name = $ZIBEI$_female_132 }
+	else_if = { limit = { local_var:zibei_id = 133 } set_first_name = $ZIBEI$_female_133 }
+	else_if = { limit = { local_var:zibei_id = 134 } set_first_name = $ZIBEI$_female_134 }
+	else_if = { limit = { local_var:zibei_id = 135 } set_first_name = $ZIBEI$_female_135 }
+	else_if = { limit = { local_var:zibei_id = 136 } set_first_name = $ZIBEI$_female_136 }
+	else_if = { limit = { local_var:zibei_id = 137 } set_first_name = $ZIBEI$_female_137 }
+	else_if = { limit = { local_var:zibei_id = 138 } set_first_name = $ZIBEI$_female_138 }
+	else_if = { limit = { local_var:zibei_id = 139 } set_first_name = $ZIBEI$_female_139 }
+	else_if = { limit = { local_var:zibei_id = 140 } set_first_name = $ZIBEI$_female_140 }
+	else_if = { limit = { local_var:zibei_id = 141 } set_first_name = $ZIBEI$_female_141 }
+	else_if = { limit = { local_var:zibei_id = 142 } set_first_name = $ZIBEI$_female_142 }
+	else_if = { limit = { local_var:zibei_id = 143 } set_first_name = $ZIBEI$_female_143 }
+	else_if = { limit = { local_var:zibei_id = 144 } set_first_name = $ZIBEI$_female_144 }
+	else_if = { limit = { local_var:zibei_id = 145 } set_first_name = $ZIBEI$_female_145 }
+	else_if = { limit = { local_var:zibei_id = 146 } set_first_name = $ZIBEI$_female_146 }
+	else_if = { limit = { local_var:zibei_id = 147 } set_first_name = $ZIBEI$_female_147 }
+	else_if = { limit = { local_var:zibei_id = 148 } set_first_name = $ZIBEI$_female_148 }
+	else_if = { limit = { local_var:zibei_id = 149 } set_first_name = $ZIBEI$_female_149 }
+	else_if = { limit = { local_var:zibei_id = 150 } set_first_name = $ZIBEI$_female_150 }
+	else_if = { limit = { local_var:zibei_id = 151 } set_first_name = $ZIBEI$_female_151 }
+	else_if = { limit = { local_var:zibei_id = 152 } set_first_name = $ZIBEI$_female_152 }
+	else_if = { limit = { local_var:zibei_id = 153 } set_first_name = $ZIBEI$_female_153 }
+	else_if = { limit = { local_var:zibei_id = 154 } set_first_name = $ZIBEI$_female_154 }
+	else_if = { limit = { local_var:zibei_id = 155 } set_first_name = $ZIBEI$_female_155 }
+	else_if = { limit = { local_var:zibei_id = 156 } set_first_name = $ZIBEI$_female_156 }
+	else_if = { limit = { local_var:zibei_id = 157 } set_first_name = $ZIBEI$_female_157 }
+	else_if = { limit = { local_var:zibei_id = 158 } set_first_name = $ZIBEI$_female_158 }
+	else_if = { limit = { local_var:zibei_id = 159 } set_first_name = $ZIBEI$_female_159 }
+	else_if = { limit = { local_var:zibei_id = 160 } set_first_name = $ZIBEI$_female_160 }
+	else_if = { limit = { local_var:zibei_id = 161 } set_first_name = $ZIBEI$_female_161 }
+	else_if = { limit = { local_var:zibei_id = 162 } set_first_name = $ZIBEI$_female_162 }
+	else_if = { limit = { local_var:zibei_id = 163 } set_first_name = $ZIBEI$_female_163 }
+	else_if = { limit = { local_var:zibei_id = 164 } set_first_name = $ZIBEI$_female_164 }
+	else_if = { limit = { local_var:zibei_id = 165 } set_first_name = $ZIBEI$_female_165 }
+	else_if = { limit = { local_var:zibei_id = 166 } set_first_name = $ZIBEI$_female_166 }
+	else_if = { limit = { local_var:zibei_id = 167 } set_first_name = $ZIBEI$_female_167 }
+	else_if = { limit = { local_var:zibei_id = 168 } set_first_name = $ZIBEI$_female_168 }
+	else_if = { limit = { local_var:zibei_id = 169 } set_first_name = $ZIBEI$_female_169 }
+	else_if = { limit = { local_var:zibei_id = 170 } set_first_name = $ZIBEI$_female_170a }
+	else_if = { limit = { local_var:zibei_id = 171 } set_first_name = $ZIBEI$_female_171 }
+	else_if = { limit = { local_var:zibei_id = 172 } set_first_name = $ZIBEI$_female_172 }
+	else_if = { limit = { local_var:zibei_id = 173 } set_first_name = $ZIBEI$_female_173 }
+	else_if = { limit = { local_var:zibei_id = 174 } set_first_name = $ZIBEI$_female_174 }
+	else_if = { limit = { local_var:zibei_id = 175 } set_first_name = $ZIBEI$_female_175 }
+	else_if = { limit = { local_var:zibei_id = 176 } set_first_name = $ZIBEI$_female_176 }
+	else_if = { limit = { local_var:zibei_id = 177 } set_first_name = $ZIBEI$_female_177 }
+	else_if = { limit = { local_var:zibei_id = 178 } set_first_name = $ZIBEI$_female_178 }
+	else_if = { limit = { local_var:zibei_id = 179 } set_first_name = $ZIBEI$_female_179 }
+	else_if = { limit = { local_var:zibei_id = 180 } set_first_name = $ZIBEI$_female_180 }
+	else_if = { limit = { local_var:zibei_id = 181 } set_first_name = $ZIBEI$_female_181 }
+	else_if = { limit = { local_var:zibei_id = 182 } set_first_name = $ZIBEI$_female_182 }
+	else_if = { limit = { local_var:zibei_id = 183 } set_first_name = $ZIBEI$_female_183 }
+	else_if = { limit = { local_var:zibei_id = 184 } set_first_name = $ZIBEI$_female_184 }
+	else_if = { limit = { local_var:zibei_id = 185 } set_first_name = $ZIBEI$_female_185 }
+	else_if = { limit = { local_var:zibei_id = 186 } set_first_name = $ZIBEI$_female_186 }
+	else_if = { limit = { local_var:zibei_id = 187 } set_first_name = $ZIBEI$_female_187 }
+	else_if = { limit = { local_var:zibei_id = 188 } set_first_name = $ZIBEI$_female_188 }
+	else_if = { limit = { local_var:zibei_id = 189 } set_first_name = $ZIBEI$_female_189 }
+	else_if = { limit = { local_var:zibei_id = 190 } set_first_name = $ZIBEI$_female_190 }
+	else_if = { limit = { local_var:zibei_id = 191 } set_first_name = $ZIBEI$_female_191 }
+	else_if = { limit = { local_var:zibei_id = 192 } set_first_name = $ZIBEI$_female_192 }
+	else_if = { limit = { local_var:zibei_id = 193 } set_first_name = $ZIBEI$_female_193 }
+	else_if = { limit = { local_var:zibei_id = 194 } set_first_name = $ZIBEI$_female_194 }
+	else_if = { limit = { local_var:zibei_id = 195 } set_first_name = $ZIBEI$_female_195 }
+	else_if = { limit = { local_var:zibei_id = 196 } set_first_name = $ZIBEI$_female_196 }
+	else_if = { limit = { local_var:zibei_id = 197 } set_first_name = $ZIBEI$_female_197 }
+	else_if = { limit = { local_var:zibei_id = 198 } set_first_name = $ZIBEI$_female_198 }
+	else_if = { limit = { local_var:zibei_id = 199 } set_first_name = $ZIBEI$_female_199 }
+	else_if = { limit = { local_var:zibei_id = 200 } set_first_name = $ZIBEI$_female_200a }
+}
+
+# 3. 100字木字旁单字名赋名映射（供明式始祖之子辈专用，复用 zibei_wood_001~100 本地化词条）
+zibei_assign_wood_single_name = {
+	if = {      limit = { local_var:zibei_id = 1 }   set_first_name = zibei_wood_001 }
+	else_if = { limit = { local_var:zibei_id = 2 }   set_first_name = zibei_wood_002 }
+	else_if = { limit = { local_var:zibei_id = 3 }   set_first_name = zibei_wood_003 }
+	else_if = { limit = { local_var:zibei_id = 4 }   set_first_name = zibei_wood_004 }
+	else_if = { limit = { local_var:zibei_id = 5 }   set_first_name = zibei_wood_005 }
+	else_if = { limit = { local_var:zibei_id = 6 }   set_first_name = zibei_wood_006 }
+	else_if = { limit = { local_var:zibei_id = 7 }   set_first_name = zibei_wood_007 }
+	else_if = { limit = { local_var:zibei_id = 8 }   set_first_name = zibei_wood_008 }
+	else_if = { limit = { local_var:zibei_id = 9 }   set_first_name = zibei_wood_009 }
+	else_if = { limit = { local_var:zibei_id = 10 }  set_first_name = zibei_wood_010 }
+	else_if = { limit = { local_var:zibei_id = 11 }  set_first_name = zibei_wood_011 }
+	else_if = { limit = { local_var:zibei_id = 12 }  set_first_name = zibei_wood_012 }
+	else_if = { limit = { local_var:zibei_id = 13 }  set_first_name = zibei_wood_013 }
+	else_if = { limit = { local_var:zibei_id = 14 }  set_first_name = zibei_wood_014 }
+	else_if = { limit = { local_var:zibei_id = 15 }  set_first_name = zibei_wood_015 }
+	else_if = { limit = { local_var:zibei_id = 16 }  set_first_name = zibei_wood_016 }
+	else_if = { limit = { local_var:zibei_id = 17 }  set_first_name = zibei_wood_017 }
+	else_if = { limit = { local_var:zibei_id = 18 }  set_first_name = zibei_wood_018 }
+	else_if = { limit = { local_var:zibei_id = 19 }  set_first_name = zibei_wood_019 }
+	else_if = { limit = { local_var:zibei_id = 20 }  set_first_name = zibei_wood_020 }
+	else_if = { limit = { local_var:zibei_id = 21 }  set_first_name = zibei_wood_021 }
+	else_if = { limit = { local_var:zibei_id = 22 }  set_first_name = zibei_wood_022 }
+	else_if = { limit = { local_var:zibei_id = 23 }  set_first_name = zibei_wood_023 }
+	else_if = { limit = { local_var:zibei_id = 24 }  set_first_name = zibei_wood_024 }
+	else_if = { limit = { local_var:zibei_id = 25 }  set_first_name = zibei_wood_025 }
+	else_if = { limit = { local_var:zibei_id = 26 }  set_first_name = zibei_wood_026 }
+	else_if = { limit = { local_var:zibei_id = 27 }  set_first_name = zibei_wood_027 }
+	else_if = { limit = { local_var:zibei_id = 28 }  set_first_name = zibei_wood_028 }
+	else_if = { limit = { local_var:zibei_id = 29 }  set_first_name = zibei_wood_029 }
+	else_if = { limit = { local_var:zibei_id = 30 }  set_first_name = zibei_wood_030 }
+	else_if = { limit = { local_var:zibei_id = 31 }  set_first_name = zibei_wood_031 }
+	else_if = { limit = { local_var:zibei_id = 32 }  set_first_name = zibei_wood_032 }
+	else_if = { limit = { local_var:zibei_id = 33 }  set_first_name = zibei_wood_033 }
+	else_if = { limit = { local_var:zibei_id = 34 }  set_first_name = zibei_wood_034 }
+	else_if = { limit = { local_var:zibei_id = 35 }  set_first_name = zibei_wood_035 }
+	else_if = { limit = { local_var:zibei_id = 36 }  set_first_name = zibei_wood_036 }
+	else_if = { limit = { local_var:zibei_id = 37 }  set_first_name = zibei_wood_037 }
+	else_if = { limit = { local_var:zibei_id = 38 }  set_first_name = zibei_wood_038 }
+	else_if = { limit = { local_var:zibei_id = 39 }  set_first_name = zibei_wood_039 }
+	else_if = { limit = { local_var:zibei_id = 40 }  set_first_name = zibei_wood_040 }
+	else_if = { limit = { local_var:zibei_id = 41 }  set_first_name = zibei_wood_041 }
+	else_if = { limit = { local_var:zibei_id = 42 }  set_first_name = zibei_wood_042 }
+	else_if = { limit = { local_var:zibei_id = 43 }  set_first_name = zibei_wood_043 }
+	else_if = { limit = { local_var:zibei_id = 44 }  set_first_name = zibei_wood_044 }
+	else_if = { limit = { local_var:zibei_id = 45 }  set_first_name = zibei_wood_045 }
+	else_if = { limit = { local_var:zibei_id = 46 }  set_first_name = zibei_wood_046 }
+	else_if = { limit = { local_var:zibei_id = 47 }  set_first_name = zibei_wood_047 }
+	else_if = { limit = { local_var:zibei_id = 48 }  set_first_name = zibei_wood_048 }
+	else_if = { limit = { local_var:zibei_id = 49 }  set_first_name = zibei_wood_049 }
+	else_if = { limit = { local_var:zibei_id = 50 }  set_first_name = zibei_wood_050 }
+	else_if = { limit = { local_var:zibei_id = 51 }  set_first_name = zibei_wood_051 }
+	else_if = { limit = { local_var:zibei_id = 52 }  set_first_name = zibei_wood_052 }
+	else_if = { limit = { local_var:zibei_id = 53 }  set_first_name = zibei_wood_053 }
+	else_if = { limit = { local_var:zibei_id = 54 }  set_first_name = zibei_wood_054 }
+	else_if = { limit = { local_var:zibei_id = 55 }  set_first_name = zibei_wood_055 }
+	else_if = { limit = { local_var:zibei_id = 56 }  set_first_name = zibei_wood_056 }
+	else_if = { limit = { local_var:zibei_id = 57 }  set_first_name = zibei_wood_057 }
+	else_if = { limit = { local_var:zibei_id = 58 }  set_first_name = zibei_wood_058 }
+	else_if = { limit = { local_var:zibei_id = 59 }  set_first_name = zibei_wood_059 }
+	else_if = { limit = { local_var:zibei_id = 60 }  set_first_name = zibei_wood_060 }
+	else_if = { limit = { local_var:zibei_id = 61 }  set_first_name = zibei_wood_061 }
+	else_if = { limit = { local_var:zibei_id = 62 }  set_first_name = zibei_wood_062 }
+	else_if = { limit = { local_var:zibei_id = 63 }  set_first_name = zibei_wood_063 }
+	else_if = { limit = { local_var:zibei_id = 64 }  set_first_name = zibei_wood_064 }
+	else_if = { limit = { local_var:zibei_id = 65 }  set_first_name = zibei_wood_065 }
+	else_if = { limit = { local_var:zibei_id = 66 }  set_first_name = zibei_wood_066 }
+	else_if = { limit = { local_var:zibei_id = 67 }  set_first_name = zibei_wood_067 }
+	else_if = { limit = { local_var:zibei_id = 68 }  set_first_name = zibei_wood_068 }
+	else_if = { limit = { local_var:zibei_id = 69 }  set_first_name = zibei_wood_069 }
+	else_if = { limit = { local_var:zibei_id = 70 }  set_first_name = zibei_wood_070 }
+	else_if = { limit = { local_var:zibei_id = 71 }  set_first_name = zibei_wood_071 }
+	else_if = { limit = { local_var:zibei_id = 72 }  set_first_name = zibei_wood_072 }
+	else_if = { limit = { local_var:zibei_id = 73 }  set_first_name = zibei_wood_073 }
+	else_if = { limit = { local_var:zibei_id = 74 }  set_first_name = zibei_wood_074 }
+	else_if = { limit = { local_var:zibei_id = 75 }  set_first_name = zibei_wood_075 }
+	else_if = { limit = { local_var:zibei_id = 76 }  set_first_name = zibei_wood_076 }
+	else_if = { limit = { local_var:zibei_id = 77 }  set_first_name = zibei_wood_077 }
+	else_if = { limit = { local_var:zibei_id = 78 }  set_first_name = zibei_wood_078 }
+	else_if = { limit = { local_var:zibei_id = 79 }  set_first_name = zibei_wood_079 }
+	else_if = { limit = { local_var:zibei_id = 80 }  set_first_name = zibei_wood_080 }
+	else_if = { limit = { local_var:zibei_id = 81 }  set_first_name = zibei_wood_081 }
+	else_if = { limit = { local_var:zibei_id = 82 }  set_first_name = zibei_wood_082 }
+	else_if = { limit = { local_var:zibei_id = 83 }  set_first_name = zibei_wood_083 }
+	else_if = { limit = { local_var:zibei_id = 84 }  set_first_name = zibei_wood_084 }
+	else_if = { limit = { local_var:zibei_id = 85 }  set_first_name = zibei_wood_085 }
+	else_if = { limit = { local_var:zibei_id = 86 }  set_first_name = zibei_wood_086 }
+	else_if = { limit = { local_var:zibei_id = 87 }  set_first_name = zibei_wood_087 }
+	else_if = { limit = { local_var:zibei_id = 88 }  set_first_name = zibei_wood_088 }
+	else_if = { limit = { local_var:zibei_id = 89 }  set_first_name = zibei_wood_089 }
+	else_if = { limit = { local_var:zibei_id = 90 }  set_first_name = zibei_wood_090 }
+	else_if = { limit = { local_var:zibei_id = 91 }  set_first_name = zibei_wood_091 }
+	else_if = { limit = { local_var:zibei_id = 92 }  set_first_name = zibei_wood_092 }
+	else_if = { limit = { local_var:zibei_id = 93 }  set_first_name = zibei_wood_093 }
+	else_if = { limit = { local_var:zibei_id = 94 }  set_first_name = zibei_wood_094 }
+	else_if = { limit = { local_var:zibei_id = 95 }  set_first_name = zibei_wood_095 }
+	else_if = { limit = { local_var:zibei_id = 96 }  set_first_name = zibei_wood_096 }
+	else_if = { limit = { local_var:zibei_id = 97 }  set_first_name = zibei_wood_097 }
+	else_if = { limit = { local_var:zibei_id = 98 }  set_first_name = zibei_wood_098 }
+	else_if = { limit = { local_var:zibei_id = 99 }  set_first_name = zibei_wood_099 }
+	else_if = { limit = { local_var:zibei_id = 100 } set_first_name = zibei_wood_100 }
+}
