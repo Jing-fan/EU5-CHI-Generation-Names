@@ -36,6 +36,7 @@ zibei_is_imperial_close_branch_trigger = {
 
 # 按当前角色所属字辈方案（1..7），判断该王朝是否启用了“宗室女性按字辈赐名”
 zibei_scheme_includes_females_trigger = {
+	has_variable = zibei_scheme
 	OR = {
 		AND = { var:zibei_scheme = 1 has_global_variable = zibei_include_females_1 }
 		AND = { var:zibei_scheme = 2 has_global_variable = zibei_include_females_2 }
